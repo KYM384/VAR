@@ -11,6 +11,8 @@ from models import VAR, VQVAE, VectorQuantizer2
 from utils.amp_sc import AmpOptimizer
 from utils.misc import MetricLogger, TensorboardLogger
 
+import wandb
+
 Ten = torch.Tensor
 FTen = torch.Tensor
 ITen = torch.LongTensor
@@ -142,9 +144,9 @@ class VARTrainer(object):
             prob_per_class_is_chosen /= prob_per_class_is_chosen.sum()
             cluster_usage = (prob_per_class_is_chosen > 0.001 / V).float().mean().item() * 100
             if dist.is_master():
-                if g_it == 0:
-                    tb_lg.update(head='AR_iter_loss', z_voc_usage=cluster_usage, step=-10000)
-                    tb_lg.update(head='AR_iter_loss', z_voc_usage=cluster_usage, step=-1000)
+                # if g_it == 0:
+                #     tb_lg.update(head='AR_iter_loss', z_voc_usage=cluster_usage, step=-10000)
+                #     tb_lg.update(head='AR_iter_loss', z_voc_usage=cluster_usage, step=-1000)
                 kw = dict(z_voc_usage=cluster_usage)
                 for si, (bg, ed) in enumerate(self.begin_ends):
                     if 0 <= prog_si < si: break
@@ -153,8 +155,9 @@ class VARTrainer(object):
                     ce = self.val_loss(pred, tar).item()
                     kw[f'acc_{self.resos[si]}'] = acc
                     kw[f'L_{self.resos[si]}'] = ce
-                tb_lg.update(head='AR_iter_loss', **kw, step=g_it)
-                tb_lg.update(head='AR_iter_schedule', prog_a_reso=self.resos[prog_si], prog_si=prog_si, prog_wp=prog_wp, step=g_it)
+                # tb_lg.update(head='AR_iter_loss', **kw, step=g_it)
+                # tb_lg.update(head='AR_iter_schedule', prog_a_reso=self.resos[prog_si], prog_si=prog_si, prog_wp=prog_wp, step=g_it)
+                wandb.log({f'AR_iter_loss/{k}': v for k, v in kw.items()}, step=g_it)
         
         self.var_wo_ddp.prog_si = self.vae_local.quantize.prog_si = -1
         return grad_norm, scale_log2

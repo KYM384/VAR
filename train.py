@@ -15,6 +15,8 @@ from utils.data import build_dataset
 from utils.data_sampler import DistInfiniteBatchSampler, EvalDistributedSampler
 from utils.misc import auto_resume
 
+import wandb
+
 
 def build_everything(args: arg_util.Args):
     # resume
@@ -27,6 +29,10 @@ def build_everything(args: arg_util.Args):
         # noinspection PyTypeChecker
         tb_lg = misc.DistLogger(misc.TensorboardLogger(log_dir=args.tb_log_dir_path, filename_suffix=f'__{misc.time_str("%m%d_%H%M")}'), verbose=True)
         tb_lg.flush()
+
+        wandb.init(
+            project="VAR", name="CIFAR-10 VAR"
+        )
     else:
         # noinspection PyTypeChecker
         tb_lg = misc.DistLogger(None, verbose=False)
@@ -83,14 +89,14 @@ def build_everything(args: arg_util.Args):
     from utils.lr_control import filter_params
     
     vae_local, var_wo_ddp = build_vae_var(
-        V=4096, Cvae=32, ch=160, share_quant_resi=4,        # hard-coded VQVAE hyperparameters
+        V=1024, Cvae=256, ch=128, share_quant_resi=1,       # hard-coded VQVAE hyperparameters
         device=dist.get_device(), patch_nums=args.patch_nums,
         num_classes=num_classes, depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
     )
     
-    vae_ckpt = 'vae_ch160v4096z32.pth'
+    vae_ckpt = 'vae_ch128v1024z256.pth'
     if dist.is_local_master():
         if not os.path.exists(vae_ckpt):
             os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{vae_ckpt}')
