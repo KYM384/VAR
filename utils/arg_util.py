@@ -242,7 +242,7 @@ def init_dist_and_get_args():
     # update args: data loading
     args.device = dist.get_device()
     if args.pn == '32':
-        args.pn = '1_2_4_8_16'
+        args.pn = '1_2_3_4_5_7_10_13_16'
     if args.pn == '256':
         args.pn = '1_2_3_4_5_6_8_10_13_16'
     elif args.pn == '512':

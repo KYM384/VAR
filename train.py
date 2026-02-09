@@ -77,7 +77,7 @@ def build_everything(args: arg_util.Args):
         print(f'[dataloader] gbs={args.glb_batch_size}, lbs={args.batch_size}, iters_train={iters_train}, types(tr, va)={types}')
     
     else:
-        num_classes = 1000
+        num_classes = 10
         ld_val = ld_train = None
         iters_train = 10
     
