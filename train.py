@@ -28,7 +28,7 @@ def build_everything(args: arg_util.Args):
         os.makedirs(args.tb_log_dir_path, exist_ok=True)
         # noinspection PyTypeChecker
         tb_lg = misc.DistLogger(misc.TensorboardLogger(log_dir=args.tb_log_dir_path, filename_suffix=f'__{misc.time_str("%m%d_%H%M")}'), verbose=True)
-        tb_lg.flush()
+        # tb_lg.flush()
 
         wandb.init(
             project="VAR", name="CIFAR-10 VAR"
@@ -90,12 +90,14 @@ def build_everything(args: arg_util.Args):
     
     vae_local, var_wo_ddp = build_vae_var(
         V=1024, Cvae=256, ch=128, share_quant_resi=1,       # hard-coded VQVAE hyperparameters
-        device=dist.get_device(), patch_nums=args.patch_nums,
+        device=dist.get_device(), latent_size=args.pn,
         num_classes=num_classes, depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
     )
-    
+
+    torch.autograd.set_detect_anomaly(True)
+
     vae_ckpt = 'vae_ch128v1024z256.pth'
     if dist.is_local_master():
         if not os.path.exists(vae_ckpt):
@@ -135,7 +137,7 @@ def build_everything(args: arg_util.Args):
     
     # build trainer
     trainer = VARTrainer(
-        device=args.device, patch_nums=args.patch_nums, resos=args.resos,
+        device=args.device, latent_size=args.pn, patch_size=args.patch_size,
         vae_local=vae_local, var_wo_ddp=var_wo_ddp, var=var,
         var_opt=var_optim, label_smooth=args.ls,
     )
@@ -153,16 +155,16 @@ def build_everything(args: arg_util.Args):
         me = misc.MetricLogger(delimiter='  ')
         trainer.train_step(
             it=0, g_it=0, stepping=True, metric_lg=me, tb_lg=tb_lg,
-            inp_B3HW=inp, label_B=label, prog_si=args.pg0, prog_wp_it=20,
+            inp_B3HW=inp, label_B=label,
         )
         trainer.load_state_dict(trainer.state_dict())
         trainer.train_step(
             it=99, g_it=599, stepping=True, metric_lg=me, tb_lg=tb_lg,
-            inp_B3HW=inp, label_B=label, prog_si=-1, prog_wp_it=20,
+            inp_B3HW=inp, label_B=label,
         )
         print({k: meter.global_avg for k, meter in me.meters.items()})
         
-        args.dump_log(); tb_lg.flush(); tb_lg.close()
+        # args.dump_log(); tb_lg.flush(); tb_lg.close()
         if isinstance(sys.stdout, misc.SyncPrint) and isinstance(sys.stderr, misc.SyncPrint):
             sys.stdout.close(), sys.stderr.close()
         exit(0)
@@ -197,7 +199,7 @@ def main_training():
             if ep < 3:
                 # noinspection PyArgumentList
                 print(f'[{type(ld_train).__name__}] [ld_train.sampler.set_epoch({ep})]', flush=True, force=True)
-        tb_lg.set_step(ep * iters_train)
+        # tb_lg.set_step(ep * iters_train)
         
         stats, (sec, remain_time, finish_time) = train_one_ep(
             ep, ep == start_ep, start_it if ep == start_ep else 0, args, tb_lg, ld_train, iters_train, trainer
@@ -237,9 +239,9 @@ def main_training():
             dist.barrier()
         
         print(    f'     [ep{ep}]  (training )  Lm: {best_L_mean:.3f} ({L_mean:.3f}), Lt: {best_L_tail:.3f} ({L_tail:.3f}),  Acc m&t: {best_acc_mean:.2f} {best_acc_tail:.2f},  Remain: {remain_time},  Finish: {finish_time}', flush=True)
-        tb_lg.update(head='AR_ep_loss', step=ep+1, **AR_ep_loss)
-        tb_lg.update(head='AR_z_burnout', step=ep+1, rest_hours=round(sec / 60 / 60, 2))
-        args.dump_log(); tb_lg.flush()
+        # tb_lg.update(head='AR_ep_loss', step=ep+1, **AR_ep_loss)
+        # tb_lg.update(head='AR_z_burnout', step=ep+1, rest_hours=round(sec / 60 / 60, 2))
+        # args.dump_log(); tb_lg.flush()
     
     total_time = f'{(time.time() - start_time) / 60 / 60:.1f}h'
     print('\n\n')
@@ -252,7 +254,7 @@ def main_training():
     
     args.remain_time, args.finish_time = '-', time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() - 60))
     print(f'final args:\n\n{str(args)}')
-    args.dump_log(); tb_lg.flush(); tb_lg.close()
+    # args.dump_log(); tb_lg.flush(); tb_lg.close()
     dist.barrier()
 
 
@@ -289,35 +291,25 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
         min_tlr, max_tlr, min_twd, max_twd = lr_wd_annealing(args.sche, trainer.var_opt.optimizer, args.tlr, args.twd, args.twde, g_it, wp_it, max_it, wp0=args.wp0, wpe=args.wpe)
         args.cur_lr, args.cur_wd = max_tlr, max_twd
         
-        if args.pg: # default: args.pg == 0.0, means no progressive training, won't get into this
-            if g_it <= wp_it: prog_si = args.pg0
-            elif g_it >= max_it*args.pg: prog_si = len(args.patch_nums) - 1
-            else:
-                delta = len(args.patch_nums) - 1 - args.pg0
-                progress = min(max((g_it - wp_it) / (max_it*args.pg - wp_it), 0), 1) # from 0 to 1
-                prog_si = args.pg0 + round(progress * delta)    # from args.pg0 to len(args.patch_nums)-1
-        else:
-            prog_si = -1
-        
         stepping = (g_it + 1) % args.ac == 0
         step_cnt += int(stepping)
         
         grad_norm, scale_log2 = trainer.train_step(
             it=it, g_it=g_it, stepping=stepping, metric_lg=me, tb_lg=tb_lg,
-            inp_B3HW=inp, label_B=label, prog_si=prog_si, prog_wp_it=args.pgwp * iters_train,
+            inp_B3HW=inp, label_B=label,
         )
         
         me.update(tlr=max_tlr)
-        tb_lg.set_step(step=g_it)
-        tb_lg.update(head='AR_opt_lr/lr_min', sche_tlr=min_tlr)
-        tb_lg.update(head='AR_opt_lr/lr_max', sche_tlr=max_tlr)
-        tb_lg.update(head='AR_opt_wd/wd_max', sche_twd=max_twd)
-        tb_lg.update(head='AR_opt_wd/wd_min', sche_twd=min_twd)
-        tb_lg.update(head='AR_opt_grad/fp16', scale_log2=scale_log2)
+        # tb_lg.set_step(step=g_it)
+        # tb_lg.update(head='AR_opt_lr/lr_min', sche_tlr=min_tlr)
+        # tb_lg.update(head='AR_opt_lr/lr_max', sche_tlr=max_tlr)
+        # tb_lg.update(head='AR_opt_wd/wd_max', sche_twd=max_twd)
+        # tb_lg.update(head='AR_opt_wd/wd_min', sche_twd=min_twd)
+        # tb_lg.update(head='AR_opt_grad/fp16', scale_log2=scale_log2)
         
-        if args.tclip > 0:
-            tb_lg.update(head='AR_opt_grad/grad', grad_norm=grad_norm)
-            tb_lg.update(head='AR_opt_grad/grad', grad_clip=args.tclip)
+        # if args.tclip > 0:
+        #     tb_lg.update(head='AR_opt_grad/grad', grad_norm=grad_norm)
+        #     tb_lg.update(head='AR_opt_grad/grad', grad_clip=args.tclip)
     
     me.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in me.meters.items()}, me.iter_time.time_preds(max_it - (g_it + 1) + (args.ep - ep) * 15)  # +15: other cost

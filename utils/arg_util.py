@@ -65,20 +65,13 @@ class Args(Tap):
     fuse: bool = True       # whether to use fused op like flash attn, xformers, fused MLP, fused LayerNorm, etc.
     
     # data
-    pn: str = '1_2_3_4_5_6_8_10_13_16'
-    patch_size: int = 16
-    patch_nums: tuple = None    # [automatically set; don't specify this] = tuple(map(int, args.pn.replace('-', '_').split('_')))
-    resos: tuple = None         # [automatically set; don't specify this] = tuple(pn * args.patch_size for pn in args.patch_nums)
-    
+    pn: int = 16    # latent size
+    patch_size: int = 2   # downscale
+
     data_load_reso: int = None  # [automatically set; don't specify this] would be max(patch_nums) * patch_size
     mid_reso: float = 1.125     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
     hflip: bool = False         # augmentation: horizontal flip
     workers: int = 0        # num workers; 0: auto, -1: don't use multiprocessing in DataLoader
-    
-    # progressive training
-    pg: float = 0.0         # >0 for use progressive training during [0%, this] of training
-    pg0: int = 4            # progressive initial stage, 0: from the 1st token map, 1: from the 2nd token map, etc
-    pgwp: float = 0         # num of warmup epochs at each progressive stage
     
     # would be automatically set in runtime
     cmd: str = ' '.join(sys.argv[1:])  # [automatically set; don't specify this]
@@ -211,14 +204,12 @@ def init_dist_and_get_args():
             break
     args = Args(explicit_bool=True).parse_args(known_only=True)
     if args.local_debug:
-        args.pn = '1_2_3'
+        args.pn = 16
         args.seed = 1
         args.aln = 1e-2
         args.alng = 1e-5
         args.saln = False
         args.afuse = False
-        args.pg = 0.8
-        args.pg0 = 1
     else:
         if args.data_path == '/path/to/imagenet':
             raise ValueError(f'{"*"*40}  please specify --data_path=/path/to/imagenet  {"*"*40}')
@@ -237,21 +228,11 @@ def init_dist_and_get_args():
     
     # set env
     args.set_tf32(args.tf32)
-    args.seed_everything(benchmark=args.pg == 0)
+    args.seed_everything(benchmark=True)
     
     # update args: data loading
     args.device = dist.get_device()
-    if args.pn == '32':
-        args.pn = '1_2_3_4_5_7_10_13_16'
-    if args.pn == '256':
-        args.pn = '1_2_3_4_5_6_8_10_13_16'
-    elif args.pn == '512':
-        args.pn = '1_2_3_4_6_9_13_18_24_32'
-    elif args.pn == '1024':
-        args.pn = '1_2_3_4_5_7_9_12_16_21_27_36_48_64'
-    args.patch_nums = tuple(map(int, args.pn.replace('-', '_').split('_')))
-    args.resos = tuple(pn * args.patch_size for pn in args.patch_nums)
-    args.data_load_reso = max(args.resos)
+    args.data_load_reso = args.pn * args.patch_size
     
     # update args: bs and lr
     bs_per_gpu = round(args.bs / args.ac / dist.get_world_size())
@@ -264,12 +245,6 @@ def init_dist_and_get_args():
     
     if args.wp == 0:
         args.wp = args.ep * 1/50
-    
-    # update args: progressive training
-    if args.pgwp == 0:
-        args.pgwp = args.ep * 1/300
-    if args.pg > 0:
-        args.sche = f'lin{args.pg:g}'
     
     # update args: paths
     args.log_txt_path = os.path.join(args.local_out_dir_path, 'log.txt')

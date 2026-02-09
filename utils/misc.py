@@ -128,8 +128,8 @@ class TensorboardLogger(object):
     def __init__(self, log_dir, filename_suffix):
         try: import tensorflow_io as tfio
         except: pass
-        from torch.utils.tensorboard import SummaryWriter
-        self.writer = SummaryWriter(log_dir=log_dir, filename_suffix=filename_suffix)
+        # from torch.utils.tensorboard import SummaryWriter
+        # self.writer = SummaryWriter(log_dir=log_dir, filename_suffix=filename_suffix)
         self.step = 0
     
     def set_step(self, step=None):
