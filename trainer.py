@@ -82,9 +82,9 @@ class VARTrainer(object):
             self.var_wo_ddp.forward
             logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l)
             L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B
-            L_tail += self.val_loss(logits_BLV.data[:, -self.last_l:].reshape(-1, V), gt_BL[:, -self.last_l:].reshape(-1)) * B
+            L_tail += self.val_loss(logits_BLV.data.reshape(-1, V), gt_BL.reshape(-1)) * B
             acc_mean += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100/gt_BL.shape[1])
-            acc_tail += (logits_BLV.data[:, -self.last_l:].argmax(dim=-1) == gt_BL[:, -self.last_l:]).sum() * (100 / self.last_l)
+            acc_tail += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100)
             tot += B
         self.var_wo_ddp.train(training)
         
@@ -149,7 +149,6 @@ class VARTrainer(object):
     
     def get_config(self):
         return {
-            'patch_nums':   self.patch_nums, 'resos': self.resos,
             'label_smooth': self.label_smooth,
         }
     
