@@ -77,7 +77,7 @@ def build_everything(args: arg_util.Args):
         print(f'[dataloader] gbs={args.glb_batch_size}, lbs={args.batch_size}, iters_train={iters_train}, types(tr, va)={types}')
     
     else:
-        num_classes = 10
+        num_classes = 1000
         ld_val = ld_train = None
         iters_train = 10
     
@@ -89,7 +89,7 @@ def build_everything(args: arg_util.Args):
     from utils.lr_control import filter_params
     
     vae_local, var_wo_ddp = build_vae_var(
-        V=1024, Cvae=256, ch=128, share_quant_resi=1,       # hard-coded VQVAE hyperparameters
+        V=4096, Cvae=32, ch=160, share_quant_resi=4,       # hard-coded VQVAE hyperparameters
         device=dist.get_device(), latent_size=args.pn,
         num_classes=num_classes, depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,

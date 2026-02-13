@@ -18,8 +18,8 @@ class VQVAE(nn.Module):
         self, vocab_size=4096, z_channels=32, ch=128, dropout=0.0,
         beta=0.25,              # commitment loss weight
         using_znorm=False,      # whether to normalize when computing the nearest neighbors
-        quant_conv_ks=1,        # quant conv kernel size
-        quant_resi=0.0,         # 0.5 means \phi(x) = 0.5conv(x) + (1-0.5)x
+        quant_conv_ks=3,        # quant conv kernel size
+        quant_resi=0.5,         # 0.5 means \phi(x) = 0.5conv(x) + (1-0.5)x
         share_quant_resi=4,     # use 4 \phi layers for K scales: partially-shared \phi
         default_qresi_counts=0, # if is 0: automatically set to
         test_mode=True,
@@ -30,7 +30,7 @@ class VQVAE(nn.Module):
         # ddconfig is copied from https://github.com/CompVis/latent-diffusion/blob/e66308c7f2e64cb581c6d27ab6fbeb846828253b/models/first_stage_models/vq-f16/config.yaml
         ddconfig = dict(
             dropout=dropout, ch=ch, z_channels=z_channels,
-            in_channels=3, ch_mult=(1, 1), num_res_blocks=2,   # from vq-f16/config.yaml above
+            in_channels=3, ch_mult=(1, 1, 2, 2, 4), num_res_blocks=2,   # from vq-f16/config.yaml above
             using_sa=True, using_mid_sa=True,                           # from vq-f16/config.yaml above
             # resamp_with_conv=True,   # always True, removed.
         )

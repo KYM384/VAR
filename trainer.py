@@ -44,7 +44,7 @@ class VARTrainer(object):
         self.L = latent_size * latent_size
         self.loss_weight = torch.ones(1, self.L, device=device) / self.L
         
-        SIGMA_MAX = 24
+        SIGMA_MAX = 128
         SIGMA_MIN = 0.5
         K = 200
         sigmas = np.exp(np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), K))

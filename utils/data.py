@@ -4,6 +4,10 @@ import PIL.Image as PImage
 from torchvision.datasets.folder import DatasetFolder, IMG_EXTENSIONS
 from torchvision.transforms import InterpolationMode, transforms
 
+import torch
+import json
+import os
+
 
 def normalize_01_into_pm1(x):  # normalize x from [0, 1] to [-1, 1] by (x*2) - 1
     return x.add(x).add_(-1)
@@ -28,9 +32,11 @@ def build_dataset(
     train_aug, val_aug = transforms.Compose(train_aug), transforms.Compose(val_aug)
     
     # build dataset
-    train_set = DatasetFolder(root=osp.join(data_path, 'train'), loader=pil_loader, extensions=IMG_EXTENSIONS, transform=train_aug)
-    val_set = DatasetFolder(root=osp.join(data_path, 'val'), loader=pil_loader, extensions=IMG_EXTENSIONS, transform=val_aug)
-    num_classes = 10
+    # train_set = DatasetFolder(root=osp.join(data_path, 'train'), loader=pil_loader, extensions=IMG_EXTENSIONS, transform=train_aug)
+    # val_set = DatasetFolder(root=osp.join(data_path, 'val'), loader=pil_loader, extensions=IMG_EXTENSIONS, transform=val_aug)
+    train_set = ImageNetTrainDataset(root=osp.join(data_path, 'train'), loader=pil_loader, transform=train_aug)
+    val_set = ImageNetValDataset(root=osp.join(data_path, 'val'), loader=pil_loader, transform=val_aug)
+    num_classes = 1000
     print(f'[Dataset] {len(train_set)=}, {len(val_set)=}, {num_classes=}')
     print_aug(train_aug, '[train]')
     print_aug(val_aug, '[val]')
@@ -52,3 +58,48 @@ def print_aug(transform, label):
     else:
         print(transform)
     print('---------------------------\n')
+
+
+class ImageNetTrainDataset(torch.utils.data.Dataset):
+    def __init__(self, root: str, loader, transform):
+        self.root = root
+        self.loader = loader
+        self.transform = transform
+
+        self.filenames = os.listdir(self.root)
+
+        with open("imagenet_class_index.json", "r") as f:
+            self.idx_to_class = json.load(f)
+        self.class_to_idx = dict((v[0], int(k)) for k, v in self.idx_to_class.items())
+
+    def __len__(self):
+        return len(self.filenames)
+
+    def __getitem__(self, index):
+        image = self.loader(osp.join(self.root, self.filenames[index]))
+        class_name = self.filenames[index].split("_")[0]
+        label = self.class_to_idx[class_name]
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, label
+
+
+class ImageNetValDataset(torch.utils.data.Dataset):
+    def __init__(self, root: str, loader, transform):
+        self.root = root
+        self.loader = loader
+        self.transform = transform
+
+        self.filenames = sorted(os.listdir(self.root))
+
+        self.idces = open("ILSVRC2012_validation_ground_truth.txt", "r").read().splitlines()
+
+    def __len__(self):
+        return len(self.filenames)
+
+    def __getitem__(self, index):
+        image = self.loader(osp.join(self.root, self.filenames[index]))
+        label = int(self.idces[index]) - 1
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, label
