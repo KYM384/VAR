@@ -35,7 +35,7 @@ class VARTrainer(object):
         self.var_wo_ddp: VAR = var_wo_ddp  # after torch.compile
         self.var_opt = var_opt
         
-        del self.var_wo_ddp.rng
+        # del self.var_wo_ddp.rng
         self.var_wo_ddp.rng = torch.Generator(device=device)
         
         self.label_smooth = label_smooth

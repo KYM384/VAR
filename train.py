@@ -31,7 +31,7 @@ def build_everything(args: arg_util.Args):
         # tb_lg.flush()
 
         wandb.init(
-            project="VAR", name="CIFAR-10 VAR"
+            project="VAR", name="ImageNet32x32 proposed"
         )
     else:
         # noinspection PyTypeChecker
@@ -96,9 +96,7 @@ def build_everything(args: arg_util.Args):
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
     )
 
-    torch.autograd.set_detect_anomaly(True)
-
-    vae_ckpt = 'vae_ch128v1024z256.pth'
+    vae_ckpt = 'vae_ch160v4096z32.pth'
     if dist.is_local_master():
         if not os.path.exists(vae_ckpt):
             os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{vae_ckpt}')
@@ -191,6 +189,8 @@ def main_training():
     start_time = time.time()
     best_L_mean, best_L_tail, best_acc_mean, best_acc_tail = 999., 999., -1., -1.
     best_val_loss_mean, best_val_loss_tail, best_val_acc_mean, best_val_acc_tail = 999, 999, -1, -1
+
+    torch.autograd.set_detect_anomaly(True)
     
     L_mean, L_tail = -1, -1
     for ep in range(start_ep, args.ep):
