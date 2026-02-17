@@ -35,7 +35,7 @@ class VARTrainer(object):
         self.var_wo_ddp: VAR = var_wo_ddp  # after torch.compile
         self.var_opt = var_opt
         
-        del self.var_wo_ddp.rng
+        # del self.var_wo_ddp.rng
         self.var_wo_ddp.rng = torch.Generator(device=device)
         
         self.label_smooth = label_smooth
@@ -44,7 +44,7 @@ class VARTrainer(object):
         self.L = latent_size * latent_size
         self.loss_weight = torch.ones(1, self.L, device=device) / self.L
         
-        SIGMA_MAX = 24
+        SIGMA_MAX = 128
         SIGMA_MIN = 0.5
         K = 200
         sigmas = np.exp(np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), K))
