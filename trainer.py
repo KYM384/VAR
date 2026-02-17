@@ -24,7 +24,7 @@ BTen = torch.BoolTensor
 
 class VARTrainer(object):
     def __init__(
-        self, device, latent_size: int, patch_size: int,
+        self, device, latent_size: int,
         vae_local: VQVAE, var_wo_ddp: VAR, var: DDP,
         var_opt: AmpOptimizer, label_smooth: float,
     ):
@@ -43,20 +43,7 @@ class VARTrainer(object):
         self.val_loss = nn.CrossEntropyLoss(label_smoothing=0.0, reduction='mean')
         self.L = latent_size * latent_size
         self.loss_weight = torch.ones(1, self.L, device=device) / self.L
-        
-        SIGMA_MAX = 128
-        SIGMA_MIN = 0.5
-        K = 200
-        sigmas = np.exp(np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), K))
-        sigmas = np.concatenate(([0.0], sigmas))
-        self.sigmas = 0.5 * torch.from_numpy(sigmas)**2
 
-        image_size = latent_size * patch_size
-        self.freqs = np.pi**2 * (
-            torch.arange(image_size).view(1,-1) / image_size + \
-            torch.arange(image_size).view(-1,1) / image_size
-        ).reshape(1,1,image_size,image_size)
-    
     @torch.no_grad()
     def eval_ep(self, ld_val: DataLoader):
         tot = 0
@@ -70,9 +57,9 @@ class VARTrainer(object):
             label_B = label_B.to(dist.get_device(), non_blocking=True)
 
             # DCT
-            t = self.sigmas[torch.randint(0, len(self.sigmas), (B,))]
+            t = self.var_wo_ddp.sigmas[torch.randint(0, len(self.var_wo_ddp.sigmas), (B,))]
             dct_B3HW = DCT(inp_B3HW)
-            dct_B3HW = (- t.reshape(B,1,1,1) * self.freqs).exp().to(dct_B3HW) * dct_B3HW
+            dct_B3HW = (- t.reshape(B,1,1,1) * self.var_wo_ddp.freqs).exp().to(dct_B3HW) * dct_B3HW
             inp_B3HW_blured = iDCT(dct_B3HW)
             
             gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)
@@ -104,9 +91,9 @@ class VARTrainer(object):
         self.var.require_backward_grad_sync = stepping
         
         # DCT
-        t = self.sigmas[torch.randint(0, len(self.sigmas), (B,))]
+        t = self.var_wo_ddp.sigmas[torch.randint(0, len(self.var_wo_ddp.sigmas), (B,))]
         dct_B3HW = DCT(inp_B3HW)
-        dct_B3HW = (- t.reshape(B,1,1,1) * self.freqs).exp().to(dct_B3HW) * dct_B3HW
+        dct_B3HW = (- t.reshape(B,1,1,1) * self.var_wo_ddp.freqs).exp().to(dct_B3HW) * dct_B3HW
         inp_B3HW_blured = iDCT(dct_B3HW)
         
         gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)

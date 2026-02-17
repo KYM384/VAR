@@ -4,12 +4,14 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import numpy as np
 from huggingface_hub import PyTorchModelHubMixin
 
 import dist
 from models.basic_var import AdaLNBeforeHead, AdaLNSelfAttn
 from models.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_
 from models.vqvae import VQVAE, VectorQuantizer2
+from dct import DCT, iDCT
 
 
 class SharedAdaLin(nn.Linear):
@@ -24,7 +26,7 @@ class VAR(nn.Module):
         num_classes=1000, depth=16, embed_dim=1024, num_heads=16, mlp_ratio=4., drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
         norm_eps=1e-6, shared_aln=False, cond_drop_rate=0.1,
         attn_l2_norm=False,
-        latent_size=16,
+        latent_size=16, patch_size=2,
         flash_if_available=True, fused_if_available=True,
     ):
         super().__init__()
@@ -85,6 +87,19 @@ class VAR(nn.Module):
         self.head_nm = AdaLNBeforeHead(self.C, self.D, norm_layer=norm_layer)
         self.head = nn.Linear(self.C, self.V)
     
+        SIGMA_MAX = 128
+        SIGMA_MIN = 0.5
+        K = 200
+        sigmas = np.exp(np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), K))
+        sigmas = np.concatenate(([0.0], sigmas))
+        self.sigmas = 0.5 * torch.from_numpy(sigmas)**2
+
+        image_size = latent_size * patch_size
+        self.freqs = np.pi**2 * (
+            torch.arange(image_size).view(1,-1) / image_size + \
+            torch.arange(image_size).view(-1,1) / image_size
+        ).reshape(1,1,image_size,image_size)
+    
     def get_logits(self, h_or_h_and_residual: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], cond_BD: Optional[torch.Tensor]):
         if not isinstance(h_or_h_and_residual, torch.Tensor):
             h, resi = h_or_h_and_residual   # fused_add_norm must be used
@@ -120,27 +135,40 @@ class VAR(nn.Module):
         
         sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
         
-        lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC
-        next_token_map = sos.unsqueeze(1).expand(2 * B, self.first_l, -1) + self.pos_start.expand(2 * B, self.first_l, -1) + lvl_pos[:, :self.first_l]
+        next_token_map = sos.unsqueeze(1).expand(2 * B, self.L, -1) + self.pos_1LC
         
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
-        x = next_token_map
-        AdaLNSelfAttn.forward
-        for b in self.blocks:
-            x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-        logits_BlV = self.get_logits(x, cond_BD)
-        
-        t = cfg * ratio
-        logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
-        
-        idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
-        if not more_smooth: # this is the default case
-            h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
-        else:   # not used when evaluating FID/IS/Precision/Recall
-            gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
-            h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
-        
-        h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, self.latent_size, self.latent_size)
+
+        schedule = torch.flip(self.sigmas, dims=[0])
+        print(schedule)
+        for i in range(len(schedule)):
+            x = next_token_map
+            AdaLNSelfAttn.forward
+            for b in self.blocks:
+                x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+            logits_BlV = self.get_logits(x, cond_BD)
+            
+            t = cfg
+            logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
+            
+            idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+            if not more_smooth: # this is the default case
+                h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
+            else:   # not used when evaluating FID/IS/Precision/Recall
+                gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
+                h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+            
+            h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, self.latent_size, self.latent_size)
+            inp_B3HW = self.vae_proxy[0].fhat_to_img(h_BChw)
+            if i < len(schedule) - 1:
+                t = schedule[i+1].reshape(-1).to(inp_B3HW).repeat(B).reshape(B,1,1,1)
+                dct_B3HW = DCT(inp_B3HW)
+                dct_B3HW = (- t * self.freqs).exp().to(dct_B3HW) * dct_B3HW
+                inp_B3HW_next = iDCT(dct_B3HW)
+
+                next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next)
+                next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(inp_B3HW_next)
+                # next_token_map = 
 
         for b in self.blocks: b.attn.kv_caching(False)
         return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
@@ -156,7 +184,7 @@ class VAR(nn.Module):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
             sos = cond_BD = self.class_emb(label_B)
             sos = sos.unsqueeze(1).expand(B, self.L, -1)            
-            x_BLC = sos + self.pos_1LC
+            x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + self.pos_1LC
         
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
         
