@@ -107,7 +107,7 @@ class VectorQuantizer2(nn.Module):
         
         SN = 1
         # find the nearest embedding
-        z_NC = f_no_grad.permute(0, 2, 3, 1).reshape(-1, C)
+        z_NC = f_no_grad.permute(0, 2, 3, 1).reshape(-1, C).float()
         if self.using_znorm:
             z_NC = F.normalize(z_NC, dim=-1)
             idx_N = torch.argmax(z_NC @ F.normalize(self.embedding.weight.data.T, dim=0), dim=1)

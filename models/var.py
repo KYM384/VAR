@@ -111,6 +111,8 @@ class VAR(nn.Module):
     @torch.no_grad()
     def autoregressive_infer_cfg(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
+        inp_B3HW: torch.Tensor,
+        num_steps: Optional[int] = None, shift: [Optional[float]] = None,
         g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
         more_smooth=False,
     ) -> torch.Tensor:   # returns reconstructed image (B, 3, H, W) in [0, 1]
@@ -135,12 +137,30 @@ class VAR(nn.Module):
         
         sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
         
-        next_token_map = sos.unsqueeze(1).expand(2 * B, self.L, -1) + self.pos_1LC
-        
+        schedule = torch.flip(self.sigmas, dims=[0])
+        if shift is not None:
+            M = schedule.max()
+            schedule = schedule / M
+            schedule = shift * schedule / (1 + (shift - 1) * schedule)
+            schedule = (schedule) * M
+
+        if num_steps is not None:
+            indces = torch.linspace(0, len(schedule)-1, num_steps).long()
+            schedule = schedule[indces]
+
+        t = schedule[0].reshape(-1,1,1,1).repeat(B,1,1,1)
+        # dct_B3HW = DCT(inp_B3HW)
+        # dct_B3HW = (- t * self.freqs).exp().to(dct_B3HW) * dct_B3HW
+        # inp_B3HW = iDCT(dct_B3HW).float()
+        inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,32,32)
+        # history = [ ]
+        next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
+        next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
+        next_token_map = self.word_embed(next_token_map) + self.pos_1LC
+        next_token_map = next_token_map.repeat(2,1,1)
+
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
 
-        schedule = torch.flip(self.sigmas, dims=[0])
-        print(schedule)
         for i in range(len(schedule)):
             x = next_token_map
             AdaLNSelfAttn.forward
@@ -148,8 +168,7 @@ class VAR(nn.Module):
                 x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
             logits_BlV = self.get_logits(x, cond_BD)
             
-            t = cfg
-            logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
+            logits_BlV = (1+cfg) * logits_BlV[:B] - cfg * logits_BlV[B:]
             
             idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
             if not more_smooth: # this is the default case
@@ -159,19 +178,31 @@ class VAR(nn.Module):
                 h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
             
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, self.latent_size, self.latent_size)
-            inp_B3HW = self.vae_proxy[0].fhat_to_img(h_BChw)
+            inp_B3HW_next = self.vae_proxy[0].fhat_to_img(h_BChw).float()
+            # history.append( inp_B3HW.clone() )
             if i < len(schedule) - 1:
-                t = schedule[i+1].reshape(-1).to(inp_B3HW).repeat(B).reshape(B,1,1,1)
-                dct_B3HW = DCT(inp_B3HW)
-                dct_B3HW = (- t * self.freqs).exp().to(dct_B3HW) * dct_B3HW
-                inp_B3HW_next = iDCT(dct_B3HW)
+                t_next = schedule[i+1].reshape(-1).repeat(B).reshape(B,1,1,1)
+                dct_B3HW = DCT(inp_B3HW_next)
+                diff = (- t_next * self.freqs).exp() - (- t * self.freqs).exp()
+                dct_B3HW = diff.to(dct_B3HW) * dct_B3HW
+                inp_B3HW_next = iDCT(dct_B3HW).float() + inp_B3HW
 
-                next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next)
-                next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(inp_B3HW_next)
-                # next_token_map = 
+                inp_B3HW = inp_B3HW_next.clone()
+                t = t_next.clone()
+
+                next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next).long()
+                next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
+                next_token_map = self.word_embed(next_token_map) + self.pos_1LC
+                next_token_map = next_token_map.repeat(2,1,1)
+
+        # history.append( inp_B3HW_next.clone() )
+        # import torchvision
+        # torchvision.utils.save_image(
+        #     torch.cat(history), "generated2.png", normalize=True, nrow=len(inp_B3HW), value_range=(-1,1),
+        # )
 
         for b in self.blocks: b.attn.kv_caching(False)
-        return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
+        return inp_B3HW_next.add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
     def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
         """
