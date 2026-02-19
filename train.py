@@ -31,7 +31,7 @@ def build_everything(args: arg_util.Args):
         # tb_lg.flush()
 
         wandb.init(
-            project="VAR", name="ImageNet32x32 proposed"
+            project="VAR", name="ImageNet proposed"
         )
     else:
         # noinspection PyTypeChecker
@@ -90,7 +90,7 @@ def build_everything(args: arg_util.Args):
     
     vae_local, var_wo_ddp = build_vae_var(
         V=4096, Cvae=32, ch=160, share_quant_resi=4,       # hard-coded VQVAE hyperparameters
-        device=dist.get_device(), latent_size=args.pn,
+        device=dist.get_device(), latent_size=args.pn, patch_size=args.patch_size,
         num_classes=num_classes, depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
@@ -135,7 +135,7 @@ def build_everything(args: arg_util.Args):
     
     # build trainer
     trainer = VARTrainer(
-        device=args.device, latent_size=args.pn, patch_size=args.patch_size,
+        device=args.device, latent_size=args.pn,
         vae_local=vae_local, var_wo_ddp=var_wo_ddp, var=var,
         var_opt=var_optim, label_smooth=args.ls,
     )

@@ -107,7 +107,7 @@ class VectorQuantizer2(nn.Module):
         
         SN = 1
         # find the nearest embedding
-        z_NC = f_no_grad.permute(0, 2, 3, 1).reshape(-1, C)
+        z_NC = f_no_grad.permute(0, 2, 3, 1).reshape(-1, C).float()
         if self.using_znorm:
             z_NC = F.normalize(z_NC, dim=-1)
             idx_N = torch.argmax(z_NC @ F.normalize(self.embedding.weight.data.T, dim=0), dim=1)
@@ -131,18 +131,6 @@ class VectorQuantizer2(nn.Module):
         h_BChw = self.embedding(gt_ms_idx_Bl)
         return h_BChw.detach()    # cat BlCs to BLC, this should be float32
     
-    # ===================== get_next_autoregressive_input: only used in VAR inference, for getting next step's input =====================
-    def get_next_autoregressive_input(self, si: int, SN: int, f_hat: torch.Tensor, h_BChw: torch.Tensor) -> Tuple[Optional[torch.Tensor], torch.Tensor]: # only used in VAR inference
-        HW = self.v_patch_nums[-1]
-        if si != SN-1:
-            h = self.quant_resi[si/(SN-1)](F.interpolate(h_BChw, size=(HW, HW), mode='bicubic'))     # conv after upsample
-            f_hat.add_(h)
-            return f_hat, F.interpolate(f_hat, size=(self.v_patch_nums[si+1], self.v_patch_nums[si+1]), mode='area')
-        else:
-            h = self.quant_resi[si/(SN-1)](h_BChw)
-            f_hat.add_(h)
-            return f_hat, f_hat
-
 
 class Phi(nn.Conv2d):
     def __init__(self, embed_dim, quant_resi):
