@@ -109,7 +109,7 @@ class VARTrainer(object):
         
         # backward
         grad_norm, scale_log2 = self.var_opt.backward_clip_step(loss=loss, stepping=stepping)
-        
+
         # log
         pred_BL = logits_BLV.data.argmax(dim=-1)
         if it == 0 or it in metric_lg.log_iters:

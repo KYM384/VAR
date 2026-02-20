@@ -15,6 +15,9 @@ from utils.data import build_dataset
 from utils.data_sampler import DistInfiniteBatchSampler, EvalDistributedSampler
 from utils.misc import auto_resume
 
+from torch.profiler import profile, record_function, ProfilerActivity
+
+
 import wandb
 
 
@@ -60,10 +63,11 @@ def build_everything(args: arg_util.Args):
         ld_train = DataLoader(
             dataset=dataset_train, num_workers=args.workers, pin_memory=True,
             generator=args.get_different_generator_for_each_rank(), # worker_init_fn=worker_init_fn,
-            batch_sampler=DistInfiniteBatchSampler(
-                dataset_len=len(dataset_train), glb_batch_size=args.glb_batch_size, same_seed_for_all_ranks=args.same_seed_for_all_ranks,
-                shuffle=True, fill_last=True, rank=dist.get_rank(), world_size=dist.get_world_size(), start_ep=start_ep, start_it=start_it,
-            ),
+            batch_size=args.glb_batch_size//dist.get_world_size(), shuffle=True, drop_last=True,
+            # batch_sampler=DistInfiniteBatchSampler(
+            #     dataset_len=len(dataset_train), glb_batch_size=args.glb_batch_size, same_seed_for_all_ranks=args.same_seed_for_all_ranks,
+            #     shuffle=True, fill_last=True, rank=dist.get_rank(), world_size=dist.get_world_size(), start_ep=start_ep, start_it=start_it,
+            # ),
         )
         del dataset_train
         
@@ -310,7 +314,7 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
         # if args.tclip > 0:
         #     tb_lg.update(head='AR_opt_grad/grad', grad_norm=grad_norm)
         #     tb_lg.update(head='AR_opt_grad/grad', grad_clip=args.tclip)
-    
+
     me.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in me.meters.items()}, me.iter_time.time_preds(max_it - (g_it + 1) + (args.ep - ep) * 15)  # +15: other cost
 
