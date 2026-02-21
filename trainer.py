@@ -67,7 +67,7 @@ class VARTrainer(object):
             x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
             
             self.var_wo_ddp.forward
-            logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l)
+            logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l, t.to(x_BLCv_wo_first_l))
             L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B
             L_tail += self.val_loss(logits_BLV.data.reshape(-1, V), gt_BL.reshape(-1)) * B
             acc_mean += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100/gt_BL.shape[1])
@@ -103,7 +103,7 @@ class VARTrainer(object):
         
         with self.var_opt.amp_ctx:
             self.var_wo_ddp.forward
-            logits_BLV = self.var(label_B, x_BLCv_wo_first_l)
+            logits_BLV = self.var(label_B, x_BLCv_wo_first_l, t.to(x_BLCv_wo_first_l))
             loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
             lw = self.loss_weight
             loss = loss.mul(lw).sum(dim=-1).mean()

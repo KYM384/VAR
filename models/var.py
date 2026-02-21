@@ -54,6 +54,9 @@ class VAR(nn.Module):
         self.class_emb = nn.Embedding(self.num_classes + 1, self.C)
         nn.init.trunc_normal_(self.class_emb.weight.data, mean=0, std=init_std)
 
+        self.time_embedding_dim = 512
+        self.time_emb = nn.Linear(self.time_embedding_dim, self.C)
+
         # 3. absolute position embedding
         self.pos_1LC = nn.Parameter(torch.empty(1, self.L, self.C))
         
@@ -204,10 +207,31 @@ class VAR(nn.Module):
         for b in self.blocks: b.attn.kv_caching(False)
         return inp_B3HW_next.add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
-    def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
+    def get_time_embedding(self, t):
+        """
+        Args:
+            timesteps (`torch.Tensor`):
+
+        Returns:
+            `torch.Tensor`: Embedding vectors with shape `(len(timesteps), self.time_embedding_dim)`
+        """
+        assert len(t.shape) == 1
+
+        half_dim = self.time_embedding_dim // 2
+        emb = torch.log(torch.tensor(10000.0).to(t)) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim).to(t) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+        if self.time_embedding_dim % 2 == 1:  # zero pad
+            emb = torch.nn.functional.pad(emb, (0, 1))
+        assert emb.shape == (t.shape[0], self.time_embedding_dim)
+        return emb
+
+    def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor, t: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
         """
         :param label_B: label_B
         :param x_BLCv_wo_first_l: teacher forcing input (B, self.L, self.Cvae)
+        :param t: time step tensor (B,)
         :return: logits BLV, V is vocab_size
         """
         B = x_BLCv_wo_first_l.shape[0]
@@ -215,6 +239,7 @@ class VAR(nn.Module):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
             sos = cond_BD = self.class_emb(label_B)
             sos = sos.unsqueeze(1).expand(B, self.L, -1)
+            sos = self.time_emb(self.get_time_embedding(t)).unsqueeze(1) + sos
             x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + self.pos_1LC
         
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
