@@ -71,7 +71,7 @@ class VARTrainer(object):
             L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B
             L_tail += self.val_loss(logits_BLV.data.reshape(-1, V), gt_BL.reshape(-1)) * B
             acc_mean += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100/gt_BL.shape[1])
-            acc_tail += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100 / self.last_l)
+            acc_tail += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100)
             tot += B
         self.var_wo_ddp.train(training)
         

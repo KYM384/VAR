@@ -55,7 +55,7 @@ def build_everything(args: arg_util.Args):
         
         ld_val = DataLoader(
             dataset_val, num_workers=0, pin_memory=True,
-            batch_size=round(args.batch_size*1.5), sampler=EvalDistributedSampler(dataset_val, num_replicas=dist.get_world_size(), rank=dist.get_rank()),
+            batch_size=args.batch_size, sampler=EvalDistributedSampler(dataset_val, num_replicas=dist.get_world_size(), rank=dist.get_rank()),
             shuffle=False, drop_last=False,
         )
         del dataset_val
