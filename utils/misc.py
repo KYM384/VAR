@@ -111,6 +111,8 @@ class SyncPrint(object):
     def __del__(self):
         self.close()
 
+    def isatty(self):
+        return False
 
 class DistLogger(object):
     def __init__(self, lg, verbose):

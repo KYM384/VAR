@@ -154,8 +154,8 @@ class AdaLNSelfAttn(nn.Module):
             gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
         else:
             gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(-1, 1, 6, self.C).unbind(2)
-        x = x + self.drop_path(self.attn( self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias ).mul_(gamma1))
-        x = x + self.drop_path(self.ffn( self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed when FusedMLP is used
+        x = x + self.drop_path(self.attn( self.ln_wo_grad(x).mul(scale1.add(1)).add(shift1), attn_bias=attn_bias ).mul(gamma1))
+        x = x + self.drop_path(self.ffn( self.ln_wo_grad(x).mul(scale2.add(1)).add(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed when FusedMLP is used
         return x
     
     def extra_repr(self) -> str:
@@ -171,4 +171,4 @@ class AdaLNBeforeHead(nn.Module):
     
     def forward(self, x_BLC: torch.Tensor, cond_BD: torch.Tensor):
         scale, shift = self.ada_lin(cond_BD).view(-1, 1, 2, self.C).unbind(2)
-        return self.ln_wo_grad(x_BLC).mul(scale.add(1)).add_(shift)
+        return self.ln_wo_grad(x_BLC).mul(scale.add(1)).add(shift)

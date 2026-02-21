@@ -89,16 +89,17 @@ class VARTrainer(object):
         # forward
         B, V = label_B.shape[0], self.vae_local.vocab_size
         self.var.require_backward_grad_sync = stepping
-        
+
         # DCT
-        t = self.var_wo_ddp.sigmas[torch.randint(0, len(self.var_wo_ddp.sigmas), (B,))]
-        dct_B3HW = DCT(inp_B3HW)
-        dct_B3HW = (- t.reshape(B,1,1,1) * self.var_wo_ddp.freqs).exp().to(dct_B3HW) * dct_B3HW
-        inp_B3HW_blured = iDCT(dct_B3HW)
-        
-        gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)
-        gt_BL = self.vae_local.img_to_idxBl(inp_B3HW)
-        x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
+        with torch.no_grad():
+            t = self.var_wo_ddp.sigmas[torch.randint(0, len(self.var_wo_ddp.sigmas), (B,))]
+            dct_B3HW = DCT(inp_B3HW)
+            dct_B3HW = (- t.reshape(B,1,1,1) * self.var_wo_ddp.freqs).exp().to(dct_B3HW) * dct_B3HW
+            inp_B3HW_blured = iDCT(dct_B3HW)
+            
+            gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)
+            gt_BL = self.vae_local.img_to_idxBl(inp_B3HW)
+            x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
         
         with self.var_opt.amp_ctx:
             self.var_wo_ddp.forward

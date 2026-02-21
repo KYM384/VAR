@@ -130,6 +130,9 @@ class Args(Tap):
     dbg_nan: bool = False   # 'KEVIN_LOCAL' in os.environ
     
     def compile_model(self, m, fast):
+        import torch._inductor
+        torch._inductor.config.compile_threads = 1
+
         if fast == 0 or self.local_debug:
             return m
         return torch.compile(m, mode={

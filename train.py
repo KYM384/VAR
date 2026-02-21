@@ -59,15 +59,15 @@ def build_everything(args: arg_util.Args):
             shuffle=False, drop_last=False,
         )
         del dataset_val
-        
+
         ld_train = DataLoader(
             dataset=dataset_train, num_workers=args.workers, pin_memory=True,
             generator=args.get_different_generator_for_each_rank(), # worker_init_fn=worker_init_fn,
-            batch_size=args.glb_batch_size//dist.get_world_size(), shuffle=True, drop_last=True,
-            # batch_sampler=DistInfiniteBatchSampler(
-            #     dataset_len=len(dataset_train), glb_batch_size=args.glb_batch_size, same_seed_for_all_ranks=args.same_seed_for_all_ranks,
-            #     shuffle=True, fill_last=True, rank=dist.get_rank(), world_size=dist.get_world_size(), start_ep=start_ep, start_it=start_it,
-            # ),
+            # batch_size=args.glb_batch_size//dist.get_world_size(), shuffle=True, drop_last=True,
+            batch_sampler=DistInfiniteBatchSampler(
+                dataset_len=len(dataset_train), glb_batch_size=args.glb_batch_size, same_seed_for_all_ranks=args.same_seed_for_all_ranks,
+                shuffle=True, fill_last=True, rank=dist.get_rank(), world_size=dist.get_world_size(), start_ep=start_ep, start_it=start_it,
+            ),
         )
         del dataset_train
         

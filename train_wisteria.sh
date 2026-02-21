@@ -1,8 +1,8 @@
 #!/bin/bash
 
-#PJM -L rscgrp=short-a
+#PJM -L rscgrp=regular-a
 #PJM -L node=1
-#PJM -L elapse=2:00:00
+#PJM -L elapse=48:00:00
 #PJM -L jobenv=singularity
 #PJM -g gb20
 #PJM -j
@@ -17,6 +17,6 @@ singularity exec --nv --bind ${PWD}:/workspace --bind /work/gb20/share/imagenet-
     "cd /workspace && \
     export WANDB_API_KEY=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 && \
     torchrun --nproc_per_node=8 --nnodes=1 train.py \
-        --depth=16 --bs=768 --ep=200 --fp16=2 --alng=1e-3 --wpe=0.1 --pn 16 --patch_size 16 \
-        --vfast=1 \
+        --depth=16 --bs=768 --ep=200 --fp16=2 --alng=1e-3 --wpe=0.1 --workers 8 --pn 16 --patch_size 16 \
+        --vfast 3 --tfast 3 --afuse 0 \
         --data_path='/data'"
