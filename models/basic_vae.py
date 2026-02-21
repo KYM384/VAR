@@ -80,6 +80,13 @@ class AttnBlock(nn.Module):
         q = q.view(B, C, H * W).contiguous()
         q = q.permute(0, 2, 1).contiguous()     # B,HW,C
         k = k.view(B, C, H * W).contiguous()    # B,C,HW
+        k = k.permute(0, 2, 1).contiguous()     # B,HW,C
+        v = v.view(B, C, H * W).contiguous()    # B,C,HW
+        v = v.permute(0, 2, 1).contiguous()     # B,HW,C
+        h = F.scaled_dot_product_attention(
+            q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1),
+        ).squeeze(1).permute(0, 2, 1)
+        """
         w = torch.bmm(q, k).mul_(self.w_ratio)  # B,HW,HW    w[B,i,j]=sum_c q[B,i,C]k[B,C,j]
         w = F.softmax(w, dim=2)
         
@@ -87,6 +94,7 @@ class AttnBlock(nn.Module):
         v = v.view(B, C, H * W).contiguous()
         w = w.permute(0, 2, 1).contiguous()  # B,HW,HW (first HW of k, second of q)
         h = torch.bmm(v, w)  # B, C,HW (HW of q) h[B,C,j] = sum_i v[B,C,i] w[B,i,j]
+        """
         h = h.view(B, C, H, W).contiguous()
         
         return x + self.proj_out(h)
