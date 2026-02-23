@@ -151,16 +151,17 @@ class VAR(nn.Module):
             indces = torch.linspace(0, len(schedule)-1, num_steps).long()
             schedule = schedule[indces]
 
-        t = schedule[0].reshape(-1,1,1,1).repeat(B,1,1,1)
+        t = schedule[0]
+        temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
         # dct_B3HW = DCT(inp_B3HW)
         # dct_B3HW = (- t * self.freqs).exp().to(dct_B3HW) * dct_B3HW
         # inp_B3HW = iDCT(dct_B3HW).float()
-        inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,32,32)
+        inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
         # history = [ ]
         next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
         next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
-        next_token_map = self.word_embed(next_token_map) + self.pos_1LC
         next_token_map = next_token_map.repeat(2,1,1)
+        next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + self.pos_1LC
 
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
 
@@ -184,7 +185,7 @@ class VAR(nn.Module):
             inp_B3HW_next = self.vae_proxy[0].fhat_to_img(h_BChw).float()
             # history.append( inp_B3HW.clone() )
             if i < len(schedule) - 1:
-                t_next = schedule[i+1].reshape(-1).repeat(B).reshape(B,1,1,1)
+                t_next = schedule[i+1].reshape(1,1,1,1)
                 dct_B3HW = DCT(inp_B3HW_next)
                 diff = (- t_next * self.freqs).exp() - (- t * self.freqs).exp()
                 dct_B3HW = diff.to(dct_B3HW) * dct_B3HW
@@ -192,11 +193,12 @@ class VAR(nn.Module):
 
                 inp_B3HW = inp_B3HW_next.clone()
                 t = t_next.clone()
+                temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
 
                 next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next).long()
                 next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
-                next_token_map = self.word_embed(next_token_map) + self.pos_1LC
                 next_token_map = next_token_map.repeat(2,1,1)
+                next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + self.pos_1LC
 
         # history.append( inp_B3HW_next.clone() )
         # import torchvision
