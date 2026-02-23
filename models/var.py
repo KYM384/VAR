@@ -153,11 +153,12 @@ class VAR(nn.Module):
         # dct_B3HW = (- t * self.freqs).exp().to(dct_B3HW) * dct_B3HW
         # inp_B3HW = iDCT(dct_B3HW).float()
         inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,32,32)
-        # history = [ ]
+        history = [ ]
         next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
         next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
-        next_token_map = self.word_embed(next_token_map) + self.pos_1LC
         next_token_map = next_token_map.repeat(2,1,1)
+        next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + self.pos_1LC
+        # next_token_map = self.word_embed(next_token_map) + self.pos_1LC
 
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
 
@@ -179,7 +180,7 @@ class VAR(nn.Module):
             
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, self.latent_size, self.latent_size)
             inp_B3HW_next = self.vae_proxy[0].fhat_to_img(h_BChw).float()
-            # history.append( inp_B3HW.clone() )
+            history.append( inp_B3HW.clone() )
             if i < len(schedule) - 1:
                 t_next = schedule[i+1].reshape(-1).repeat(B).reshape(B,1,1,1)
                 dct_B3HW = DCT(inp_B3HW_next)
@@ -192,14 +193,15 @@ class VAR(nn.Module):
 
                 next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next).long()
                 next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
-                next_token_map = self.word_embed(next_token_map) + self.pos_1LC
                 next_token_map = next_token_map.repeat(2,1,1)
+                next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + self.pos_1LC
+                # next_token_map = self.word_embed(next_token_map) + self.pos_1LC
 
-        # history.append( inp_B3HW_next.clone() )
-        # import torchvision
-        # torchvision.utils.save_image(
-        #     torch.cat(history), "generated2.png", normalize=True, nrow=len(inp_B3HW), value_range=(-1,1),
-        # )
+        history.append( inp_B3HW_next.clone() )
+        import torchvision
+        torchvision.utils.save_image(
+            torch.cat(history), "generated2.png", normalize=True, nrow=len(inp_B3HW), value_range=(-1,1),
+        )
 
         for b in self.blocks: b.attn.kv_caching(False)
         return inp_B3HW_next.add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
