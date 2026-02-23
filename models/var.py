@@ -152,12 +152,12 @@ class VAR(nn.Module):
         # dct_B3HW = DCT(inp_B3HW)
         # dct_B3HW = (- t * self.freqs).exp().to(dct_B3HW) * dct_B3HW
         # inp_B3HW = iDCT(dct_B3HW).float()
-        inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,32,32)
+        inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
         # history = [ ]
         next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
         next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
-        next_token_map = self.word_embed(next_token_map) + self.pos_1LC
         next_token_map = next_token_map.repeat(2,1,1)
+        next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + self.pos_1LC
 
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
 
@@ -192,8 +192,8 @@ class VAR(nn.Module):
 
                 next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next).long()
                 next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
-                next_token_map = self.word_embed(next_token_map) + self.pos_1LC
                 next_token_map = next_token_map.repeat(2,1,1)
+                next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + self.pos_1LC
 
         # history.append( inp_B3HW_next.clone() )
         # import torchvision

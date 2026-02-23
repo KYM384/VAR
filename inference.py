@@ -1,17 +1,30 @@
+from tqdm import tqdm
 import torchvision
 import torch
+import os
 
 from models import VQVAE, build_vae_var
+from utils.data import build_dataset
 
 
-patch_nums = (1,2,3,4,5,7,10,13,16)
-num_classes = 10
+
+torch.distributed.init_process_group(backend="nccl", init_method="env://")
+local_rank = torch.distributed.get_rank()
+world_size = torch.distributed.get_world_size()
+torch.cuda.set_device(local_rank)
+
+print(world_size, local_rank)
+
+
+latent_size = 16
+patch_size = 16
+num_classes = 1000
 depth = 16
 device = "cuda"
 
 vae, var = build_vae_var(
-    V=1024, Cvae=256, ch=128, share_quant_resi=1,       # hard-coded VQVAE hyperparameters
-    device=device, patch_nums=patch_nums,
+    V=4096, Cvae=32, ch=160, share_quant_resi=4,
+    device=device, latent_size=latent_size, patch_size=patch_size,
     num_classes=num_classes, depth=depth, shared_aln=False,
 )
 
@@ -25,24 +38,58 @@ for p in var.parameters():
     param += p.numel()
 print(f"VAR #params: {param/1e6:.2f} M")
 
-ckpt = torch.load("ar-ckpt-best.pth")["trainer"]
+ckpt = torch.load("local_output/ar-ckpt-best.pth")["trainer"]
 vae.load_state_dict(ckpt["vae_local"])
 var.load_state_dict(ckpt["var_wo_ddp"])
 
-seed = 0
-cfg = 1.0
-class_labels = tuple(range(10))
-more_smooth = False
+cfg = 2.0
+class_labels = tuple(range(num_classes))
 
-B = len(class_labels)
-label_B = torch.tensor(class_labels, device=device)
-with torch.inference_mode():
-    with torch.autocast("cuda", torch.float16):
+B = 9
+
+dataset = build_dataset("/data", final_reso=256)[-1]
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=False, num_workers=4)
+
+with torch.inference_mode(), torch.autocast("cuda", torch.float32):
+    for j, (inp_B3HW, label_B) in enumerate(tqdm(dataloader)):
+        if j % world_size != local_rank:
+            continue
+
+        inp_B3HW = inp_B3HW.to(device)
+        label_B = label_B.to(device)
+
         recon_B3HW = var.autoregressive_infer_cfg(
-            B=B, label_B=label_B, cfg=cfg, top_k=900,
-            top_p=0.95, g_seed=seed, more_smooth=more_smooth,
+            B=B, label_B=label_B, inp_B3HW=inp_B3HW, cfg=cfg, top_k=600,
+            num_steps=10, shift=1.0,
+            top_p=0.95, g_seed=None, more_smooth=False,
         )
 
-    torchvision.utils.save_image(
-        recon_B3HW, "generated.png", normalize=True, value_range=(0,1),
-    )
+        torchvision.utils.save_image(
+            recon_B3HW, f"generated.png", nrow=3, normalize=True, value_range=(0,1),
+        )
+        break
+
+"""
+for step in [10]:
+    os.makedirs(f"generated", exist_ok=True)
+
+    with torch.inference_mode(), torch.autocast("cuda", torch.float16):
+        for i in range(5):
+            for j, (inp_B3HW, label_B) in enumerate(tqdm(dataloader)):
+                if j % world_size != local_rank:
+                    continue
+
+                inp_B3HW = inp_B3HW.to(device)
+                label_B = label_B.to(device)
+
+                recon_B3HW = var.autoregressive_infer_cfg(
+                    B=B, label_B=label_B, inp_B3HW=inp_B3HW, cfg=cfg, top_k=600,
+                    num_steps=step, shift=1.0,
+                    top_p=0.95, g_seed=None, more_smooth=False,
+                )
+
+                for k in range(B):
+                    torchvision.utils.save_image(
+                        recon_B3HW[k:k+1], f"generated/{i*len(dataset) + j*B + k:06}.png", normalize=True, value_range=(0,1),
+                    )
+"""
