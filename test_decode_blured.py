@@ -12,15 +12,13 @@ os.environ["MASTER_ADDR"] = "localhost"
 os.environ["MASTER_PORT"] = "12355"
 torch.distributed.init_process_group("nccl", rank=0, world_size=1)
 
-patch_nums = list(map(int, "1_2_4_8_16".split("_")))
-model = VQVAE(vocab_size=1024, ch=128, z_channels=256, quant_conv_ks=1, quant_resi=0, share_quant_resi=1, v_patch_nums=patch_nums)
+model = VQVAE(vocab_size=16384, ch=128, z_channels=256, share_quant_resi=1)
 model = model.to("cuda")
-# model.load_state_dict(torch.load("vae_ch160v4096z32.pth"))
-model.load_state_dict(torch.load("vae_ch128v1024z256.pth"))
+model.load_state_dict(torch.load("vae_ch128v16384z256.pth"))
 
 image = Image.open("sample.jpg")
 w, h = image.size
-image = image.crop((0,0,w,w)).resize((32,32), Image.LANCZOS)
+image = image.crop((0,0,w,w)).resize((256,256), Image.LANCZOS)
 x = torchvision.transforms.ToTensor()(image).unsqueeze(0).to("cuda")
 
 SIGMA_MAX = 128
@@ -29,7 +27,7 @@ T = 10
 sigma_schedule = 0.5 * np.exp(2 * np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), T))
 sigma_schedule = np.concatenate([np.zeros(1), sigma_schedule])
 sigma_schedule = torch.from_numpy(sigma_schedule).float()
-res = 32
+res = 256
 freqs = np.pi**2 * (
     torch.arange(res).view(1,res).div(res).pow(2) + \
     torch.arange(res).view(res,1).div(res).pow(2)
@@ -45,6 +43,7 @@ with torch.no_grad():
 
     x = x*2 - 1
     f_hat, usages, vq_loss = model.quantize(model.quant_conv(model.encoder(x)), ret_usages=False)
+    # f_hat = model.quant_conv(model.encoder(x))
     y = model.decoder(model.post_quant_conv(f_hat))
 
 torchvision.utils.save_image(

@@ -1,9 +1,8 @@
 import torch
 
-patch_nums = list(map(int, "1_2_4_8_16".split("_")))
-# model = VQVAE(vocab_size=1024, ch=128, z_channels=256, quant_conv_ks=1, quant_resi=0, share_quant_resi=1, v_patch_nums=patch_nums)
+# model = VQVAE(vocab_size=16384, ch=128, z_channels=256, share_quant_resi=1)
 
-ckpt = torch.load("cifar_vae.ckpt")
+ckpt = torch.load("imagenet_vqvae.ckpt", weights_only=False)
 state_dict2 = ckpt["state_dict"]
 new_state_dict2 = {}
 
@@ -25,6 +24,6 @@ for k in state_dict2.keys():
     else:
         new_state_dict2[k] = state_dict2[k]
 
-new_state_dict2["quantize.ema_vocab_hit_SV"] = torch.zeros((len(patch_nums), 1024))
+new_state_dict2["quantize.ema_vocab_hit_SV"] = torch.zeros((1024, 256))
 
-torch.save(new_state_dict2, "vae_ch128v1024z256.pth")
+torch.save(new_state_dict2, "vae_ch128v16384z256.pth")

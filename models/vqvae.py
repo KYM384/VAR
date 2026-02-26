@@ -18,8 +18,8 @@ class VQVAE(nn.Module):
         self, vocab_size=4096, z_channels=32, ch=128, dropout=0.0,
         beta=0.25,              # commitment loss weight
         using_znorm=False,      # whether to normalize when computing the nearest neighbors
-        quant_conv_ks=3,        # quant conv kernel size
-        quant_resi=0.5,         # 0.5 means \phi(x) = 0.5conv(x) + (1-0.5)x
+        quant_conv_ks=1,        # quant conv kernel size
+        quant_resi=0.0,         # 0.5 means \phi(x) = 0.5conv(x) + (1-0.5)x
         share_quant_resi=4,     # use 4 \phi layers for K scales: partially-shared \phi
         default_qresi_counts=0, # if is 0: automatically set to
         test_mode=True,

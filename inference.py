@@ -23,7 +23,7 @@ depth = 16
 device = "cuda"
 
 vae, var = build_vae_var(
-    V=4096, Cvae=32, ch=160, share_quant_resi=4,
+    V=16384, Cvae=256, ch=128, share_quant_resi=1,
     device=device, latent_size=latent_size, patch_size=patch_size,
     num_classes=num_classes, depth=depth, shared_aln=False,
 )
