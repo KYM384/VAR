@@ -87,7 +87,7 @@ class VAR(nn.Module):
         self.head_nm = AdaLNBeforeHead(self.C, self.D, norm_layer=norm_layer)
         self.head = nn.Linear(self.C, self.V)
     
-        SIGMA_MAX = 128
+        SIGMA_MAX = 24
         SIGMA_MIN = 0.5
         K = 200
         sigmas = np.exp(np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), K))
