@@ -54,8 +54,8 @@ class VAR(nn.Module):
         self.class_emb = nn.Embedding(self.num_classes + 1, self.C)
         nn.init.trunc_normal_(self.class_emb.weight.data, mean=0, std=init_std)
 
-        self.time_embedding_dim = 512
-        self.time_emb = nn.Linear(self.time_embedding_dim, self.C)
+        # self.time_embedding_dim = 512
+        # self.time_emb = nn.Linear(self.time_embedding_dim, self.C)
 
         # 3. absolute position embedding
         self.pos_1LC = nn.Parameter(torch.empty(1, self.L, self.C))
@@ -93,7 +93,7 @@ class VAR(nn.Module):
         SIGMA_MAX = 128
         SIGMA_MIN = 0.5
         K = 200
-        sigmas = np.exp(np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), K))
+        sigmas = np.exp(np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), K-1))
         sigmas = np.concatenate(([0.0], sigmas))
         self.sigmas = 0.5 * torch.from_numpy(sigmas)**2
 
@@ -102,6 +102,8 @@ class VAR(nn.Module):
             torch.arange(image_size).view(1,-1) / image_size + \
             torch.arange(image_size).view(-1,1) / image_size
         ).reshape(1,1,image_size,image_size)
+
+        self.pos_tC = nn.Parameter(torch.empty(K, self.C))
 
     def get_logits(self, h_or_h_and_residual: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], cond_BD: Optional[torch.Tensor]):
         if not isinstance(h_or_h_and_residual, torch.Tensor):
@@ -154,7 +156,8 @@ class VAR(nn.Module):
 
         t = schedule[0]
         sigma = self.sigmas[t]
-        temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
+        # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
+        temb = self.pos_tC[t].unsqueeze(1)
         dct_B3HW = DCT(inp_B3HW)
         dct_B3HW = (- sigma * self.freqs).exp().to(dct_B3HW) * dct_B3HW
         inp_B3HW = iDCT(dct_B3HW).float()
@@ -196,7 +199,9 @@ class VAR(nn.Module):
 
                 inp_B3HW = inp_B3HW_next.clone()
                 t = t_next.clone()
-                temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
+                sigma = sigma_next.clone()
+                # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
+                temb = self.pos_tC[t].unsqueeze(1)
 
                 next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next).long()
                 next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
@@ -212,14 +217,8 @@ class VAR(nn.Module):
         for b in self.blocks: b.attn.kv_caching(False)
         return inp_B3HW_next.add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
+    """
     def get_time_embedding(self, t):
-        """
-        Args:
-            timesteps (`torch.Tensor`):
-
-        Returns:
-            `torch.Tensor`: Embedding vectors with shape `(len(timesteps), self.time_embedding_dim)`
-        """
         assert len(t.shape) == 1
 
         half_dim = self.time_embedding_dim // 2
@@ -231,6 +230,7 @@ class VAR(nn.Module):
             emb = torch.nn.functional.pad(emb, (0, 1))
         assert emb.shape == (t.shape[0], self.time_embedding_dim)
         return emb
+    """
 
     def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor, t: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
         """
@@ -244,7 +244,8 @@ class VAR(nn.Module):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
             sos = cond_BD = self.class_emb(label_B)
             sos = sos.unsqueeze(1).expand(B, self.L, -1)
-            sos = self.time_emb(self.get_time_embedding(t)).unsqueeze(1) + sos
+            # sos = self.time_emb(self.get_time_embedding(t)).unsqueeze(1) + sos
+            sos = self.pos_tC[t.long()].unsqueeze(1) + sos
             x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + self.pos_1LC
         
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
