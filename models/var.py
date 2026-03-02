@@ -140,24 +140,26 @@ class VAR(nn.Module):
         
         sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
         
-        schedule = torch.flip(self.sigmas, dims=[0])
+        schedule = torch.flip(torch.arange(len(self.sigmas)), dims=[0])
         if shift is not None:
             M = schedule.max()
             schedule = schedule / M
             schedule = shift * schedule / (1 + (shift - 1) * schedule)
-            schedule = (schedule) * M
+            schedule = (schedule * M).long()
 
         if num_steps is not None:
-            indces = torch.linspace(0, len(schedule)-1, num_steps).long()
+            # indces = torch.linspace(0, len(schedule)-1, num_steps).long()
+            indces = torch.linspace(len(schedule)-50, len(schedule)-1, num_steps).long()
             schedule = schedule[indces]
 
         t = schedule[0]
+        sigma = self.sigmas[t]
         temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
-        # dct_B3HW = DCT(inp_B3HW)
-        # dct_B3HW = (- t * self.freqs).exp().to(dct_B3HW) * dct_B3HW
-        # inp_B3HW = iDCT(dct_B3HW).float()
-        inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
-        # history = [ ]
+        dct_B3HW = DCT(inp_B3HW)
+        dct_B3HW = (- sigma * self.freqs).exp().to(dct_B3HW) * dct_B3HW
+        inp_B3HW = iDCT(dct_B3HW).float()
+        # inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
+        history = [ inp_B3HW.clone() ]
         next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
         next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
         next_token_map = next_token_map.repeat(2,1,1)
@@ -183,11 +185,12 @@ class VAR(nn.Module):
             
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, self.latent_size, self.latent_size)
             inp_B3HW_next = self.vae_proxy[0].fhat_to_img(h_BChw).float()
-            # history.append( inp_B3HW.clone() )
+            history.append( inp_B3HW_next.clone() )
             if i < len(schedule) - 1:
-                t_next = schedule[i+1].reshape(1,1,1,1)
+                t_next = schedule[i+1]
+                sigma_next = self.sigmas[t_next].reshape(1,1,1,1)
                 dct_B3HW = DCT(inp_B3HW_next)
-                diff = (- t_next * self.freqs).exp() - (- t * self.freqs).exp()
+                diff = (- sigma_next * self.freqs).exp() - (- sigma * self.freqs).exp()
                 dct_B3HW = diff.to(dct_B3HW) * dct_B3HW
                 inp_B3HW_next = iDCT(dct_B3HW).float() + inp_B3HW
 
@@ -200,11 +203,11 @@ class VAR(nn.Module):
                 next_token_map = next_token_map.repeat(2,1,1)
                 next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + self.pos_1LC
 
-        # history.append( inp_B3HW_next.clone() )
-        # import torchvision
-        # torchvision.utils.save_image(
-        #     torch.cat(history), "generated2.png", normalize=True, nrow=len(inp_B3HW), value_range=(-1,1),
-        # )
+        history.append( inp_B3HW_next.clone() )
+        import torchvision
+        torchvision.utils.save_image(
+            torch.cat(history), "generated2.png", normalize=True, nrow=len(inp_B3HW), value_range=(-1,1),
+        )
 
         for b in self.blocks: b.attn.kv_caching(False)
         return inp_B3HW_next.add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]

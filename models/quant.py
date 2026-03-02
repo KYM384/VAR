@@ -74,8 +74,8 @@ class VectorQuantizer2(nn.Module):
                     if dist.initialized(): handler = tdist.all_reduce(hit_V, async_op=True)
                 
                 # calc loss
-                idx_Bhw = idx_N.view(B, pn, pn)
-                h_BChw = F.interpolate(self.embedding(idx_Bhw).permute(0, 3, 1, 2), size=(H, W), mode='bicubic').contiguous() if (si != SN-1) else self.embedding(idx_Bhw).permute(0, 3, 1, 2).contiguous()
+                idx_Bhw = idx_N.view(B, H, W)
+                h_BChw = self.embedding(idx_Bhw).permute(0, 3, 1, 2).contiguous()
                 # h_BChw = self.quant_resi[si/(SN-1)](h_BChw)
                 f_hat = f_hat + h_BChw
                 f_rest -= h_BChw
@@ -91,7 +91,7 @@ class VectorQuantizer2(nn.Module):
             
             mean_vq_loss *= 1. / SN
             f_hat = (f_hat.data - f_no_grad).add_(f_BChw)
-        
+
         margin = tdist.get_world_size() * (f_BChw.numel() / f_BChw.shape[1]) / self.vocab_size * 0.08
         # margin = pn*pn / 100
         if ret_usages: usages = [(self.ema_vocab_hit_SV[0] >= margin).float().mean().item() * 100]
