@@ -80,6 +80,7 @@ class AttnBlock(nn.Module):
         q = q.view(B, C, H * W).contiguous()
         q = q.permute(0, 2, 1).contiguous()     # B,HW,C
         k = k.view(B, C, H * W).contiguous()    # B,C,HW
+        """
         k = k.permute(0, 2, 1).contiguous()     # B,HW,C
         v = v.view(B, C, H * W).contiguous()    # B,C,HW
         v = v.permute(0, 2, 1).contiguous()     # B,HW,C
@@ -94,7 +95,7 @@ class AttnBlock(nn.Module):
         v = v.view(B, C, H * W).contiguous()
         w = w.permute(0, 2, 1).contiguous()  # B,HW,HW (first HW of k, second of q)
         h = torch.bmm(v, w)  # B, C,HW (HW of q) h[B,C,j] = sum_i v[B,C,i] w[B,i,j]
-        """
+
         h = h.view(B, C, H, W).contiguous()
         
         return x + self.proj_out(h)

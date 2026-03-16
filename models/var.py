@@ -212,11 +212,14 @@ class VAR(nn.Module):
         :return: logits BLV, V is vocab_size
         """
         B = x_BLCv_wo_first_l.shape[0]
+        L = x_BLCv_wo_first_l.shape[1]
+        pos_1LC = self.pos_1LC.reshape(1, int(self.L**0.5), int(self.L**0.5), self.C).permute(0, 3, 1, 2)
+        pos_1LC = torch.nn.functional.interpolate(pos_1LC, size=(int(L**0.5), int(L**0.5)), mode="bilinear", align_corners=False).reshape(1, self.C, L).permute(0, 2, 1)
         with torch.cuda.amp.autocast(enabled=False):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
             sos = cond_BD = self.class_emb(label_B)
-            sos = sos.unsqueeze(1).expand(B, self.L, -1)
-            x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + self.pos_1LC
+            sos = sos.unsqueeze(1).expand(B, L, -1)
+            x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + pos_1LC
         
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
         
