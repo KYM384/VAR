@@ -29,7 +29,9 @@ class VQVAE(nn.Module):
         self.V, self.Cvae = vocab_size, z_channels
         # ddconfig is copied from https://github.com/CompVis/latent-diffusion/blob/e66308c7f2e64cb581c6d27ab6fbeb846828253b/models/first_stage_models/vq-f16/config.yaml
         ddconfig = dict(
-            dropout=dropout, ch=ch, z_channels=z_channels,
+            # TODO
+            # dropout=dropout, ch=ch, z_channels=z_channels,
+            dropout=dropout, ch=ch, z_channels=256,
             in_channels=3, ch_mult=(1, 1, 2, 2, 4), num_res_blocks=2,   # from vq-f16/config.yaml above
             using_sa=True, using_mid_sa=True,                           # from vq-f16/config.yaml above
             # resamp_with_conv=True,   # always True, removed.
@@ -44,8 +46,11 @@ class VQVAE(nn.Module):
             vocab_size=vocab_size, Cvae=self.Cvae, using_znorm=using_znorm, beta=beta,
             default_qresi_counts=default_qresi_counts, quant_resi=quant_resi, share_quant_resi=share_quant_resi,
         )
-        self.quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
-        self.post_quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
+        # TODO
+        # self.quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
+        # self.post_quant_conv = torch.nn.Conv2d(self.Cvae, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
+        self.quant_conv = torch.nn.Conv2d(256, self.Cvae, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
+        self.post_quant_conv = torch.nn.Conv2d(self.Cvae, 256, quant_conv_ks, stride=1, padding=quant_conv_ks//2)
         
         if self.test_mode:
             self.eval()

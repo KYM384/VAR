@@ -80,6 +80,7 @@ class AttnBlock(nn.Module):
         q = q.view(B, C, H * W).contiguous()
         q = q.permute(0, 2, 1).contiguous()     # B,HW,C
         k = k.view(B, C, H * W).contiguous()    # B,C,HW
+        """
         k = k.permute(0, 2, 1).contiguous()     # B,HW,C
         v = v.view(B, C, H * W).contiguous()    # B,C,HW
         v = v.permute(0, 2, 1).contiguous()     # B,HW,C
@@ -94,7 +95,6 @@ class AttnBlock(nn.Module):
         v = v.view(B, C, H * W).contiguous()
         w = w.permute(0, 2, 1).contiguous()  # B,HW,HW (first HW of k, second of q)
         h = torch.bmm(v, w)  # B, C,HW (HW of q) h[B,C,j] = sum_i v[B,C,i] w[B,i,j]
-        """
         h = h.view(B, C, H, W).contiguous()
         
         return x + self.proj_out(h)
@@ -195,6 +195,7 @@ class Decoder(nn.Module):
         
         # upsampling
         self.up = nn.ModuleList()
+        # TODO
         for i_level in reversed(range(self.num_resolutions)):
             block = nn.ModuleList()
             attn = nn.ModuleList()
@@ -209,7 +210,9 @@ class Decoder(nn.Module):
             up.attn = attn
             if i_level != 0:
                 up.upsample = Upsample2x(block_in)
-            self.up.insert(0, up)  # prepend to get consistent order
+            # TODO
+            # self.up.insert(0, up)  # prepend to get consistent order
+            self.up.append(up)
         
         # end
         self.norm_out = Normalize(block_in)
@@ -221,12 +224,16 @@ class Decoder(nn.Module):
         h = self.mid.block_2(self.mid.attn_1(self.mid.block_1(self.conv_in(z))))
         
         # upsampling
-        for i_level in reversed(range(self.num_resolutions)):
+        # TODO
+        # for i_level in reversed(range(self.num_resolutions)):
+        for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
-            if i_level != 0:
+            # TODO
+            # if i_level != 0:
+            if i_level != self.num_resolutions - 1:
                 h = self.up[i_level].upsample(h)
         
         # end

@@ -150,23 +150,29 @@ class VAR(nn.Module):
             schedule = (schedule * M).long()
 
         if num_steps is not None:
-            # indces = torch.linspace(0, len(schedule)-1, num_steps).long()
+            indces = torch.linspace(0, len(schedule)-1, num_steps).long()
+            # indces = torch.linspace(len(schedule)-70, len(schedule)-50, num_steps).long()
             indces = torch.linspace(len(schedule)-50, len(schedule)-1, num_steps).long()
             schedule = schedule[indces]
 
         t = schedule[0]
-        sigma = self.sigmas[t]
+        size = 256 // 2 ** (t - 70).div((130-70)/3).ceil().clip(0, 4).long().item()
+        print(f"start size = {size}")
         # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
-        temb = self.pos_tC[t].unsqueeze(1)
+        temb = self.pos_tC[t].reshape(1, 1, -1)
+        sigma = self.sigmas[t].reshape(1,1,1,1)
+        inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
         dct_B3HW = DCT(inp_B3HW)
-        dct_B3HW = (- sigma * self.freqs).exp().to(dct_B3HW) * dct_B3HW
+        dct_B3HW = (- sigma * self.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
         inp_B3HW = iDCT(dct_B3HW).float()
         # inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
         history = [ inp_B3HW.clone() ]
         next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
         next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
         next_token_map = next_token_map.repeat(2,1,1)
-        next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + self.pos_1LC
+        pos_1LC = self.pos_1LC.reshape(1, int(self.L**0.5), int(self.L**0.5), self.C).permute(0, 3, 1, 2)
+        pos_1LC = torch.nn.functional.interpolate(pos_1LC, size=(size//16, size//16), mode="bilinear", align_corners=False).reshape(1, self.C, -1).permute(0, 2, 1)
+        next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
 
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
 
@@ -179,21 +185,27 @@ class VAR(nn.Module):
             
             logits_BlV = (1+cfg) * logits_BlV[:B] - cfg * logits_BlV[B:]
             
-            idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+            # idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+            idx_Bl = logits_BlV.argmax(-1)
             if not more_smooth: # this is the default case
                 h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
             else:   # not used when evaluating FID/IS/Precision/Recall
                 gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
                 h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
             
-            h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, self.latent_size, self.latent_size)
+            h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, size//16, size//16)
             inp_B3HW_next = self.vae_proxy[0].fhat_to_img(h_BChw).float()
             history.append( inp_B3HW_next.clone() )
             if i < len(schedule) - 1:
                 t_next = schedule[i+1]
                 sigma_next = self.sigmas[t_next].reshape(1,1,1,1)
+                size = 256 // 2 ** (t_next - 70).div((130-70)/3).ceil().clip(0, 4).long().item()
+                print(size, t_next)
+                if inp_B3HW_next.shape[2] != size:
+                    inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
+                    inp_B3HW_next = torch.nn.functional.interpolate(inp_B3HW_next, size=(size, size), mode="bilinear", align_corners=False)
                 dct_B3HW = DCT(inp_B3HW_next)
-                diff = (- sigma_next * self.freqs).exp() - (- sigma * self.freqs).exp()
+                diff = (- sigma_next * self.freqs[:,:,:size,:size]).exp() - (- sigma * self.freqs[:,:,:size,:size]).exp()
                 dct_B3HW = diff.to(dct_B3HW) * dct_B3HW
                 inp_B3HW_next = iDCT(dct_B3HW).float() + inp_B3HW
 
@@ -201,15 +213,19 @@ class VAR(nn.Module):
                 t = t_next.clone()
                 sigma = sigma_next.clone()
                 # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
-                temb = self.pos_tC[t].unsqueeze(1)
+                temb = self.pos_tC[t].reshape(1, 1, -1)
 
                 next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next).long()
                 next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
                 next_token_map = next_token_map.repeat(2,1,1)
-                next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + self.pos_1LC
+                pos_1LC = self.pos_1LC.reshape(1, int(self.L**0.5), int(self.L**0.5), self.C).permute(0, 3, 1, 2)
+                pos_1LC = torch.nn.functional.interpolate(pos_1LC, size=(size//16, size//16), mode="bilinear", align_corners=False).reshape(1, self.C, -1).permute(0, 2, 1)
+                next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
 
-        history.append( inp_B3HW_next.clone() )
+            history.append( inp_B3HW_next.clone() )
+
         import torchvision
+        history = [ torch.nn.functional.interpolate(h, size=(256, 256), mode="bilinear", align_corners=False) for h in history ]
         torchvision.utils.save_image(
             torch.cat(history), "generated2.png", normalize=True, nrow=len(inp_B3HW), value_range=(-1,1),
         )
@@ -240,13 +256,16 @@ class VAR(nn.Module):
         :return: logits BLV, V is vocab_size
         """
         B = x_BLCv_wo_first_l.shape[0]
+        L = x_BLCv_wo_first_l.shape[1]
+        pos_1LC = self.pos_1LC.reshape(1, int(self.L**0.5), int(self.L**0.5), self.C).permute(0, 3, 1, 2)
+        pos_1LC = torch.nn.functional.interpolate(pos_1LC, size=(int(L**0.5), int(L**0.5)), mode="bilinear", align_corners=False).reshape(1, self.C, L).permute(0, 2, 1)
         with torch.cuda.amp.autocast(enabled=False):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
             sos = cond_BD = self.class_emb(label_B)
-            sos = sos.unsqueeze(1).expand(B, self.L, -1)
+            sos = sos.unsqueeze(1).expand(B, L, -1)
             # sos = self.time_emb(self.get_time_embedding(t)).unsqueeze(1) + sos
             sos = self.pos_tC[t.long()].unsqueeze(1) + sos
-            x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + self.pos_1LC
+            x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + pos_1LC
         
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
         
