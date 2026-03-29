@@ -57,9 +57,9 @@ class VARTrainer(object):
             label_B = label_B.to(dist.get_device(), non_blocking=True)
 
             # DCT
-            t_chunk = torch.randint(0, 4, (1,)).item()
-            t_min = 60 + (140-60)//5 * (t_chunk-1) if t_chunk > 0 else 0
-            t_max = t_min + (140-60)//5 if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
+            t_chunk = torch.randint(0, 5, (1,)).item()
+            t_min = 70 + (130-70)//3 * (t_chunk-1) if t_chunk > 0 else 0
+            t_max = 70 + (130-70)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
             t = torch.randint(t_min, t_max, (B,))
             size = 256 // 2 ** int(t_chunk)
             inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
@@ -97,9 +97,9 @@ class VARTrainer(object):
 
         # DCT
         with torch.no_grad():
-            t_chunk = torch.randint(0, 4, (1,)).item()
-            t_min = 60 + (140-60)//5 * (t_chunk-1) if t_chunk > 0 else 0
-            t_max = t_min + (140-60)//5 if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
+            t_chunk = torch.randint(0, 5, (1,)).item()
+            t_min = 70 + (130-70)//3 * (t_chunk-1) if t_chunk > 0 else 0
+            t_max = 70 + (130-70)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
             t = torch.randint(t_min, t_max, (B,))
             size = 256 // 2 ** int(t_chunk)
             inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
