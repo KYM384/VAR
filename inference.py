@@ -23,7 +23,7 @@ depth = 16
 device = "cuda"
 
 vae, var = build_vae_var(
-    V=16384, Cvae=256, ch=128, share_quant_resi=1,
+    V=16384, Cvae=8, ch=128, share_quant_resi=1,
     device=device, latent_size=latent_size, patch_size=patch_size,
     num_classes=num_classes, depth=depth, shared_aln=False,
 )
@@ -52,8 +52,8 @@ dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=False, n
 
 with torch.inference_mode(), torch.autocast("cuda", torch.float32):
     for j, (inp_B3HW, label_B) in enumerate(tqdm(dataloader)):
-        if j % world_size != local_rank:
-            continue
+        if local_rank > 0:
+            break
 
         inp_B3HW = inp_B3HW.to(device)
         label_B = label_B.to(device)

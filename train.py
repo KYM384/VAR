@@ -93,19 +93,19 @@ def build_everything(args: arg_util.Args):
     from utils.lr_control import filter_params
     
     vae_local, var_wo_ddp = build_vae_var(
-        V=16384, Cvae=256, ch=128, share_quant_resi=1,       # hard-coded VQVAE hyperparameters
+        V=16384, Cvae=8, ch=128, share_quant_resi=1,       # hard-coded VQVAE hyperparameters
         device=dist.get_device(), latent_size=args.pn, patch_size=args.patch_size,
         num_classes=num_classes, depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
     )
 
-    vae_ckpt = 'vae_ch128v16384z256.pth'
+    vae_ckpt = 'vq_ds16_c2i_llamagen.pt'
     if dist.is_local_master():
         if not os.path.exists(vae_ckpt):
             os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{vae_ckpt}')
     dist.barrier()
-    vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
+    vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=False)
     
     vae_local: VQVAE = args.compile_model(vae_local, args.vfast)
     var_wo_ddp: VAR = args.compile_model(var_wo_ddp, args.tfast)
@@ -119,7 +119,7 @@ def build_everything(args: arg_util.Args):
     # build optimizer
     names, paras, para_groups = filter_params(var_wo_ddp, nowd_keys={
         'cls_token', 'start_token', 'task_token', 'cfg_uncond',
-        'pos_embed', 'pos_1LC', 'pos_start', 'start_pos', 'lvl_embed',
+        'pos_embed', 'pos_1LC', 'pos_start', 'start_pos', 'lvl_embed', 'pos_tC',
         'gamma', 'beta',
         'ada_gss', 'moe_bias',
         'scale_mul',

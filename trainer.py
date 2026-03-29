@@ -57,10 +57,14 @@ class VARTrainer(object):
             label_B = label_B.to(dist.get_device(), non_blocking=True)
 
             # DCT
-            t = torch.randint(0, len(self.var_wo_ddp.sigmas), (B,))
-            sigma = self.var_wo_ddp.sigmas[t]
+            t_chunk = torch.randint(0, 4, (1,)).item()
+            t_min = 60 + (140-60)//5 * (t_chunk-1) if t_chunk > 0 else 0
+            t_max = t_min + (140-60)//5 if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
+            t = torch.randint(t_min, t_max, (B,))
+            size = 256 // 2 ** int(t_chunk)
+            inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
             dct_B3HW = DCT(inp_B3HW)
-            dct_B3HW = (- sigma.reshape(B,1,1,1) * self.var_wo_ddp.freqs).exp().to(dct_B3HW) * dct_B3HW
+            dct_B3HW = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
             inp_B3HW_blured = iDCT(dct_B3HW)
             
             gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)
@@ -93,10 +97,14 @@ class VARTrainer(object):
 
         # DCT
         with torch.no_grad():
-            t = torch.randint(0, len(self.var_wo_ddp.sigmas), (B,))
-            sigma = self.var_wo_ddp.sigmas[t]
+            t_chunk = torch.randint(0, 4, (1,)).item()
+            t_min = 60 + (140-60)//5 * (t_chunk-1) if t_chunk > 0 else 0
+            t_max = t_min + (140-60)//5 if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
+            t = torch.randint(t_min, t_max, (B,))
+            size = 256 // 2 ** int(t_chunk)
+            inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
             dct_B3HW = DCT(inp_B3HW)
-            dct_B3HW = (- sigma.reshape(B,1,1,1) * self.var_wo_ddp.freqs).exp().to(dct_B3HW) * dct_B3HW
+            dct_B3HW = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
             inp_B3HW_blured = iDCT(dct_B3HW)
             
             gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)
@@ -107,8 +115,9 @@ class VARTrainer(object):
             self.var_wo_ddp.forward
             logits_BLV = self.var(label_B, x_BLCv_wo_first_l, t.to(x_BLCv_wo_first_l))
             loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
-            lw = self.loss_weight
-            loss = loss.mul(lw).sum(dim=-1).mean()
+            # lw = self.loss_weight
+            # loss = loss.mul(lw).sum(dim=-1).mean()
+            loss = loss.mean()
         
         # backward
         grad_norm, scale_log2 = self.var_opt.backward_clip_step(loss=loss, stepping=stepping)
