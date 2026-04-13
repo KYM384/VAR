@@ -150,9 +150,9 @@ class VAR(nn.Module):
             schedule = (schedule * M).long()
 
         if num_steps is not None:
-            indces = torch.linspace(0, len(schedule)-1, num_steps).long()
-            # indces = torch.linspace(len(schedule)-70, len(schedule)-50, num_steps).long()
-            indces = torch.linspace(len(schedule)-50, len(schedule)-1, num_steps).long()
+            # indces = torch.linspace(0, len(schedule)-1, num_steps).long()
+            indces = torch.linspace(len(schedule)-70, len(schedule)-50, num_steps).long()
+            # indces = torch.linspace(len(schedule)-50, len(schedule)-1, num_steps).long()
             schedule = schedule[indces]
 
         t = schedule[0]
@@ -185,8 +185,8 @@ class VAR(nn.Module):
             
             logits_BlV = (1+cfg) * logits_BlV[:B] - cfg * logits_BlV[B:]
             
-            # idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
-            idx_Bl = logits_BlV.argmax(-1)
+            idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+            # idx_Bl = logits_BlV.argmax(-1)
             if not more_smooth: # this is the default case
                 h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
             else:   # not used when evaluating FID/IS/Precision/Recall
