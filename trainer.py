@@ -62,10 +62,11 @@ class VARTrainer(object):
             t_max = 70 + (130-70)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
             t = torch.randint(t_min, t_max, (B,))
             size = 256 // 2 ** int(t_chunk)
-            inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
-            dct_B3HW = DCT(inp_B3HW)
-            dct_B3HW = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
-            inp_B3HW_blured = iDCT(dct_B3HW)
+            weight = (t_max - t_min) / ((130-70)//3)
+            dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
+            dct_B3HW_blured = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
+            inp_B3HW_blured = iDCT(dct_B3HW_blured)
+            inp_B3HW = iDCT(dct_B3HW)
             
             gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)
             gt_BL = self.vae_local.img_to_idxBl(inp_B3HW)
@@ -73,8 +74,8 @@ class VARTrainer(object):
             
             self.var_wo_ddp.forward
             logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l, t.to(x_BLCv_wo_first_l))
-            L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B
-            L_tail += self.val_loss(logits_BLV.data.reshape(-1, V), gt_BL.reshape(-1)) * B
+            L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B * weight
+            L_tail += self.val_loss(logits_BLV.data.reshape(-1, V), gt_BL.reshape(-1)) * B * weight
             acc_mean += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100/gt_BL.shape[1])
             acc_tail += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100)
             tot += B
@@ -102,10 +103,11 @@ class VARTrainer(object):
             t_max = 70 + (130-70)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
             t = torch.randint(t_min, t_max, (B,))
             size = 256 // 2 ** int(t_chunk)
-            inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
-            dct_B3HW = DCT(inp_B3HW)
-            dct_B3HW = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
-            inp_B3HW_blured = iDCT(dct_B3HW)
+            weight = (t_max - t_min) / ((130-70)//3)
+            dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
+            dct_B3HW_blured = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
+            inp_B3HW_blured = iDCT(dct_B3HW_blured)
+            inp_B3HW = iDCT(dct_B3HW)
             
             gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)
             gt_BL = self.vae_local.img_to_idxBl(inp_B3HW)
@@ -117,7 +119,7 @@ class VARTrainer(object):
             loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
             # lw = self.loss_weight
             # loss = loss.mul(lw).sum(dim=-1).mean()
-            loss = loss.mean()
+            loss = weight * loss.mean()
         
         # backward
         grad_norm, scale_log2 = self.var_opt.backward_clip_step(loss=loss, stepping=stepping)

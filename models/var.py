@@ -151,8 +151,8 @@ class VAR(nn.Module):
 
         if num_steps is not None:
             # indces = torch.linspace(0, len(schedule)-1, num_steps).long()
-            indces = torch.linspace(len(schedule)-70, len(schedule)-50, num_steps).long()
-            # indces = torch.linspace(len(schedule)-50, len(schedule)-1, num_steps).long()
+            # indces = torch.linspace(len(schedule)-70, len(schedule)-50, num_steps).long()
+            indces = torch.linspace(len(schedule)-200, len(schedule)-1, num_steps).long()
             schedule = schedule[indces]
 
         t = schedule[0]
@@ -161,8 +161,8 @@ class VAR(nn.Module):
         # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
         temb = self.pos_tC[t].reshape(1, 1, -1)
         sigma = self.sigmas[t].reshape(1,1,1,1)
-        inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
-        dct_B3HW = DCT(inp_B3HW)
+        # inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
+        dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
         dct_B3HW = (- sigma * self.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
         inp_B3HW = iDCT(dct_B3HW).float()
         # inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
@@ -201,13 +201,16 @@ class VAR(nn.Module):
                 sigma_next = self.sigmas[t_next].reshape(1,1,1,1)
                 size = 256 // 2 ** (t_next - 70).div((130-70)/3).ceil().clip(0, 4).long().item()
                 print(size, t_next)
-                if inp_B3HW_next.shape[2] != size:
-                    inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
-                    inp_B3HW_next = torch.nn.functional.interpolate(inp_B3HW_next, size=(size, size), mode="bilinear", align_corners=False)
-                dct_B3HW = DCT(inp_B3HW_next)
+                # if inp_B3HW_next.shape[2] != size:
+                #     inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
+                #     inp_B3HW_next = torch.nn.functional.interpolate(inp_B3HW_next, size=(size, size), mode="bilinear", align_corners=False)
+                dct_B3HW = DCT(inp_B3HW_next)[:,:,:size,:size]
+                if dct_B3HW.shape[2] != size:
+                    dct_B3HW = torch.nn.functional.pad(dct_B3HW, (0, size - dct_B3HW.shape[3], 0, size - dct_B3HW.shape[2]))
                 diff = (- sigma_next * self.freqs[:,:,:size,:size]).exp() - (- sigma * self.freqs[:,:,:size,:size]).exp()
                 dct_B3HW = diff.to(dct_B3HW) * dct_B3HW
-                inp_B3HW_next = iDCT(dct_B3HW).float() + inp_B3HW
+                dct_B3HW[:,:,:inp_B3HW.shape[2],:inp_B3HW.shape[3]] += DCT(inp_B3HW)
+                inp_B3HW_next = iDCT(dct_B3HW).float() # + inp_B3HW
 
                 inp_B3HW = inp_B3HW_next.clone()
                 t = t_next.clone()
@@ -266,6 +269,7 @@ class VAR(nn.Module):
             # sos = self.time_emb(self.get_time_embedding(t)).unsqueeze(1) + sos
             sos = self.pos_tC[t.long()].unsqueeze(1) + sos
             x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + pos_1LC
+            x_BLC = torch.where(t.view(B,1,1) == len(self.sigmas)-1, sos, x_BLC)
         
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
         
