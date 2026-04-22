@@ -22,3 +22,7 @@ local_output*
 
 cifar_images/
 data/
+
+wandb/
+original_VAR/
+flexVAR/

@@ -30,62 +30,68 @@ vae, var = build_vae_var(
     num_classes=num_classes, depth=depth, shared_aln=False,
 )
 
-ckpt = torch.load("local_output_initial/ar-ckpt-last.pth")["trainer"]
+ckpt = torch.load("local_output/ar-ckpt-last.pth")["trainer"]
 vae.load_state_dict(ckpt["vae_local"])
 var.load_state_dict(ckpt["var_wo_ddp"])
 
-B = 16
+B = 8
 
 dataset = build_dataset("/data", final_reso=256)[-1]
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=False, num_workers=4)
+sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=False)
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, sampler=sampler, num_workers=4)
 
 
-with torch.inference_mode(), torch.autocast("cuda", torch.float32):
-    for t in np.arange(0, 200, 5)[::-1]:
-        total_loss = 0
-        total_acc = 0
+with torch.inference_mode(), torch.autocast("cuda", torch.bfloat16):
+    for t in np.arange(0, 70, 5)[::-1]:
+        total_loss_sum = 0.0
+        total_correct = 0
+        total_samples = 0
 
         for j, (inp_B3HW, label_B) in enumerate(dataloader):
-            if j % world_size != local_rank:
-                continue
-
             inp_B3HW_gt = inp_B3HW.to(device)
             label_B = label_B.to(device)
 
-            t_chunk = np.ceil((t - 70) / ((130-70)//3))
-            t_chunk = np.clip(t_chunk, 0, 4)
+            t_chunk = 0 if t < 70 else min(4, 1 + (int(t) - 70) // 20)
             size = 256 // 2 ** int(t_chunk)
-            """
-            dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
+            dct_B3HW = DCT(inp_B3HW_gt)[:,:,:size,:size]
             dct_B3HW_blured = (- var.sigmas[t].reshape(-1,1,1,1) * var.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
             inp_B3HW_blured = iDCT(dct_B3HW_blured)
             inp_B3HW = iDCT(dct_B3HW)
-            """
-            inp_B3HW = torch.nn.functional.interpolate(inp_B3HW_gt, (size, size), mode="bilinear")
-            dct_B3HW = DCT(inp_B3HW)
-            dct_B3HW_blured = (- var.sigmas[t].reshape(-1,1,1,1) * var.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
-            inp_B3HW_blured = iDCT(dct_B3HW_blured)
-            
-            gt_idx_Bl = vae.img_to_idxBl(inp_B3HW_blured)
-            gt_BL = vae.img_to_idxBl(inp_B3HW)
-            x_BLCv_wo_first_l = vae.quantize.idxBl_to_var_input(gt_idx_Bl)
+            del dct_B3HW, dct_B3HW_blured
+
+            with torch.autocast("cuda", enabled=False):
+                gt_idx_Bl = vae.img_to_idxBl(inp_B3HW_blured.float())
+                gt_BL = vae.img_to_idxBl(inp_B3HW.float())
+                x_BLCv_wo_first_l = vae.quantize.idxBl_to_var_input(gt_idx_Bl)
 
             t_tensor = torch.tensor(t).reshape(1).repeat(x_BLCv_wo_first_l.size(0)).to(x_BLCv_wo_first_l)
             logits_BLV = var(label_B, x_BLCv_wo_first_l, t_tensor)
 
-            loss = torch.nn.functional.cross_entropy(logits_BLV.data.view(-1, logits_BLV.size(-1)), gt_BL.view(-1))
-            acc = (logits_BLV.data.argmax(dim=-1) == gt_BL).float().mean()
+            logits_flat = logits_BLV.data.view(-1, logits_BLV.size(-1))
+            gt_flat = gt_BL.view(-1)
+            loss_sum = torch.nn.functional.cross_entropy(logits_flat, gt_flat, reduction="sum")
+            correct = (logits_flat.argmax(dim=-1) == gt_flat).sum()
 
-            total_loss += loss.item() / len(dataloader)
-            total_acc += acc.item() / len(dataloader)
+            total_loss_sum += loss_sum.item()
+            total_correct += correct.item()
+            total_samples += gt_flat.numel()
 
-        total_loss_tensor = torch.tensor(total_loss, device=device)
-        total_acc_tensor = torch.tensor(total_acc, device=device)
+            del logits_BLV, logits_flat, gt_flat, loss_sum, correct
+            del inp_B3HW_gt, inp_B3HW, inp_B3HW_blured, label_B
+            del gt_idx_Bl, gt_BL, x_BLCv_wo_first_l, t_tensor
+
+        torch.cuda.empty_cache()
+
+        total_loss_tensor = torch.tensor(total_loss_sum, device=device)
+        total_correct_tensor = torch.tensor(total_correct, device=device, dtype=torch.float64)
+        total_samples_tensor = torch.tensor(total_samples, device=device, dtype=torch.float64)
 
         torch.distributed.barrier()
         torch.distributed.reduce(total_loss_tensor, dst=0)
-        torch.distributed.reduce(total_acc_tensor, dst=0)
+        torch.distributed.reduce(total_correct_tensor, dst=0)
+        torch.distributed.reduce(total_samples_tensor, dst=0)
 
         if local_rank == 0:
-            print(f"t={t}, loss={total_loss_tensor.item():.4f}, acc={total_acc_tensor.item():.2f}%")
+            n = total_samples_tensor.item()
+            print(f"t={t}, loss={total_loss_tensor.item()/n:.4f}, acc={total_correct_tensor.item()/n*100:.2f}%")
 
