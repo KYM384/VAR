@@ -90,7 +90,7 @@ class VAR(nn.Module):
         self.head_nm = AdaLNBeforeHead(self.C, self.D, norm_layer=norm_layer)
         self.head = nn.Linear(self.C, self.V)
     
-        SIGMA_MAX = 128
+        SIGMA_MAX = 32
         SIGMA_MIN = 0.5
         K = 200
         sigmas = np.exp(np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), K-1))
@@ -156,7 +156,7 @@ class VAR(nn.Module):
             schedule = schedule[indces]
 
         t = schedule[0]
-        size = 256 // 2 ** (t - 70).div((130-70)/3).ceil().clip(0, 4).long().item()
+        size = 256 // 2 ** (t - 90).div((180-90)/3).ceil().clip(0, 4).long().item()
         print(f"start size = {size}")
         # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
         temb = self.pos_tC[t].reshape(1, 1, -1)
@@ -199,7 +199,7 @@ class VAR(nn.Module):
             if i < len(schedule) - 1:
                 t_next = schedule[i+1]
                 sigma_next = self.sigmas[t_next].reshape(1,1,1,1)
-                size = 256 // 2 ** (t_next - 70).div((130-70)/3).ceil().clip(0, 4).long().item()
+                size = 256 // 2 ** (t_next - 90).div((180-90)/3).ceil().clip(0, 4).long().item()
                 print(size, t_next)
                 # if inp_B3HW_next.shape[2] != size:
                 #     inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)

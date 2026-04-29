@@ -58,11 +58,11 @@ class VARTrainer(object):
 
             # DCT
             t_chunk = torch.randint(0, 5, (1,)).item()
-            t_min = 70 + (130-70)//3 * (t_chunk-1) if t_chunk > 0 else 0
-            t_max = 70 + (130-70)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
+            t_min = 90 + (180-90)//3 * (t_chunk-1) if t_chunk > 0 else 0
+            t_max = 90 + (180-90)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
             t = torch.randint(t_min, t_max, (B,))
             size = 256 // 2 ** int(t_chunk)
-            weight = (t_max - t_min) / ((130-70)//3)
+            weight = (t_max - t_min) / ((180-90)//3)
             dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
             dct_B3HW_blured = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
             inp_B3HW_blured = iDCT(dct_B3HW_blured)
@@ -99,11 +99,11 @@ class VARTrainer(object):
         # DCT
         with torch.no_grad():
             t_chunk = torch.randint(0, 5, (1,)).item()
-            t_min = 70 + (130-70)//3 * (t_chunk-1) if t_chunk > 0 else 0
-            t_max = 70 + (130-70)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
+            t_min = 90 + (180-90)//3 * (t_chunk-1) if t_chunk > 0 else 0
+            t_max = 90 + (180-90)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
             t = torch.randint(t_min, t_max, (B,))
             size = 256 // 2 ** int(t_chunk)
-            weight = (t_max - t_min) / ((130-70)//3)
+            weight = (t_max - t_min) / ((180-90)//3)
             dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
             dct_B3HW_blured = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
             inp_B3HW_blured = iDCT(dct_B3HW_blured)
