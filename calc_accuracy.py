@@ -1,6 +1,7 @@
 from tqdm import tqdm
 import torchvision
 import torch
+import torch.nn.functional as F
 import numpy as np
 import os
 
@@ -36,15 +37,20 @@ var.load_state_dict(ckpt["var_wo_ddp"])
 
 B = 8
 
+# Codebook for distance computation between predicted and gt embeddings.
+codebook = vae.quantize.embedding.weight.detach().to(device).float()
+if getattr(vae.quantize, "using_znorm", False):
+    codebook = F.normalize(codebook, p=2, dim=-1)
+
 dataset = build_dataset("/data", final_reso=256)[-1]
 sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=False)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, sampler=sampler, num_workers=4)
 
 
 with torch.inference_mode(), torch.autocast("cuda", torch.bfloat16):
-    for t in np.arange(0, 70, 5)[::-1]:
+    for t in np.arange(0, 200, 10)[::-1]:
         total_loss_sum = 0.0
-        total_correct = 0
+        total_dist_sum = 0.0
         total_samples = 0
 
         for j, (inp_B3HW, label_B) in enumerate(dataloader):
@@ -70,28 +76,29 @@ with torch.inference_mode(), torch.autocast("cuda", torch.bfloat16):
             logits_flat = logits_BLV.data.view(-1, logits_BLV.size(-1))
             gt_flat = gt_BL.view(-1)
             loss_sum = torch.nn.functional.cross_entropy(logits_flat, gt_flat, reduction="sum")
-            correct = (logits_flat.argmax(dim=-1) == gt_flat).sum()
+            pred_flat = logits_flat.argmax(dim=-1)
+            dists = (codebook[gt_flat.long()] - codebook[pred_flat.long()]).norm(dim=-1)
 
             total_loss_sum += loss_sum.item()
-            total_correct += correct.item()
+            total_dist_sum += dists.sum().item()
             total_samples += gt_flat.numel()
 
-            del logits_BLV, logits_flat, gt_flat, loss_sum, correct
+            del logits_BLV, logits_flat, gt_flat, loss_sum, pred_flat, dists
             del inp_B3HW_gt, inp_B3HW, inp_B3HW_blured, label_B
             del gt_idx_Bl, gt_BL, x_BLCv_wo_first_l, t_tensor
 
         torch.cuda.empty_cache()
 
         total_loss_tensor = torch.tensor(total_loss_sum, device=device)
-        total_correct_tensor = torch.tensor(total_correct, device=device, dtype=torch.float64)
+        total_dist_tensor = torch.tensor(total_dist_sum, device=device, dtype=torch.float64)
         total_samples_tensor = torch.tensor(total_samples, device=device, dtype=torch.float64)
 
         torch.distributed.barrier()
         torch.distributed.reduce(total_loss_tensor, dst=0)
-        torch.distributed.reduce(total_correct_tensor, dst=0)
+        torch.distributed.reduce(total_dist_tensor, dst=0)
         torch.distributed.reduce(total_samples_tensor, dst=0)
 
         if local_rank == 0:
             n = total_samples_tensor.item()
-            print(f"t={t}, loss={total_loss_tensor.item()/n:.4f}, acc={total_correct_tensor.item()/n*100:.2f}%")
+            print(f"t={t}, loss={total_loss_tensor.item()/n:.4f}, avg_dist={total_dist_tensor.item()/n:.4f}")
 

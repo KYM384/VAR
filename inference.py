@@ -38,7 +38,7 @@ for p in var.parameters():
     param += p.numel()
 print(f"VAR #params: {param/1e6:.2f} M")
 
-ckpt = torch.load("local_output/ar-ckpt-best.pth")["trainer"]
+ckpt = torch.load("local_output/ar-ckpt-last.pth")["trainer"]
 vae.load_state_dict(ckpt["vae_local"])
 var.load_state_dict(ckpt["var_wo_ddp"])
 
@@ -46,6 +46,7 @@ cfg = 2.0
 class_labels = tuple(range(num_classes))
 
 B = 9
+shifts = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0]
 
 dataset = build_dataset("/data", final_reso=256)[-1]
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=False, num_workers=4)
@@ -58,38 +59,18 @@ with torch.inference_mode(), torch.autocast("cuda", torch.float32):
         inp_B3HW = inp_B3HW.to(device)
         label_B = label_B.to(device)
 
-        recon_B3HW = var.autoregressive_infer_cfg(
-            B=B, label_B=label_B, inp_B3HW=inp_B3HW, cfg=cfg, top_k=600,
-            num_steps=10, shift=1.0,
-            top_p=0.95, g_seed=None, more_smooth=False,
-        )
+        recon_list = []
+        for shift in shifts:
+            recon_B3HW = var.autoregressive_infer_cfg(
+                B=B, label_B=label_B, inp_B3HW=inp_B3HW, cfg=cfg, top_k=600,
+                num_steps=10, shift=shift,
+                top_p=0.95, g_seed=0, more_smooth=False,
+            )
+            recon_list.append(recon_B3HW)
+
+        all_recon = torch.cat(recon_list, dim=0)
 
         torchvision.utils.save_image(
-            recon_B3HW, f"generated.png", nrow=3, normalize=True, value_range=(0,1),
+            all_recon, f"generated.png", nrow=B, normalize=True, value_range=(0,1),
         )
         break
-
-"""
-for step in [10]:
-    os.makedirs(f"generated", exist_ok=True)
-
-    with torch.inference_mode(), torch.autocast("cuda", torch.float16):
-        for i in range(5):
-            for j, (inp_B3HW, label_B) in enumerate(tqdm(dataloader)):
-                if j % world_size != local_rank:
-                    continue
-
-                inp_B3HW = inp_B3HW.to(device)
-                label_B = label_B.to(device)
-
-                recon_B3HW = var.autoregressive_infer_cfg(
-                    B=B, label_B=label_B, inp_B3HW=inp_B3HW, cfg=cfg, top_k=600,
-                    num_steps=step, shift=1.0,
-                    top_p=0.95, g_seed=None, more_smooth=False,
-                )
-
-                for k in range(B):
-                    torchvision.utils.save_image(
-                        recon_B3HW[k:k+1], f"generated/{i*len(dataset) + j*B + k:06}.png", normalize=True, value_range=(0,1),
-                    )
-"""

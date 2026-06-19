@@ -57,8 +57,16 @@ class VAR(nn.Module):
         # self.time_embedding_dim = 512
         # self.time_emb = nn.Linear(self.time_embedding_dim, self.C)
 
-        # 3. absolute position embedding
-        self.pos_1LC = nn.Parameter(torch.empty(1, self.L, self.C))
+        # 3. absolute position embedding (separate tensor for each grid size)
+        self.grid_sides = []
+        s = 1
+        while s <= latent_size:
+            self.grid_sides.append(s)
+            s *= 2
+        self.pos_embeds = nn.ParameterDict({
+            str(side): nn.Parameter(torch.empty(1, side * side, self.C))
+            for side in self.grid_sides
+        })
         
         # 4. backbone blocks
         self.shared_ada_lin = nn.Sequential(nn.SiLU(inplace=False), SharedAdaLin(self.D, 6*self.C)) if shared_aln else nn.Identity()
@@ -170,8 +178,7 @@ class VAR(nn.Module):
         next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
         next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
         next_token_map = next_token_map.repeat(2,1,1)
-        pos_1LC = self.pos_1LC.reshape(1, int(self.L**0.5), int(self.L**0.5), self.C).permute(0, 3, 1, 2)
-        pos_1LC = torch.nn.functional.interpolate(pos_1LC, size=(size//16, size//16), mode="bilinear", align_corners=False).reshape(1, self.C, -1).permute(0, 2, 1)
+        pos_1LC = self.pos_embeds[str(size // 16)]
         next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
 
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
@@ -221,8 +228,7 @@ class VAR(nn.Module):
                 next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next).long()
                 next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
                 next_token_map = next_token_map.repeat(2,1,1)
-                pos_1LC = self.pos_1LC.reshape(1, int(self.L**0.5), int(self.L**0.5), self.C).permute(0, 3, 1, 2)
-                pos_1LC = torch.nn.functional.interpolate(pos_1LC, size=(size//16, size//16), mode="bilinear", align_corners=False).reshape(1, self.C, -1).permute(0, 2, 1)
+                pos_1LC = self.pos_embeds[str(size // 16)]
                 next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
 
             history.append( inp_B3HW_next.clone() )
@@ -260,8 +266,7 @@ class VAR(nn.Module):
         """
         B = x_BLCv_wo_first_l.shape[0]
         L = x_BLCv_wo_first_l.shape[1]
-        pos_1LC = self.pos_1LC.reshape(1, int(self.L**0.5), int(self.L**0.5), self.C).permute(0, 3, 1, 2)
-        pos_1LC = torch.nn.functional.interpolate(pos_1LC, size=(int(L**0.5), int(L**0.5)), mode="bilinear", align_corners=False).reshape(1, self.C, L).permute(0, 2, 1)
+        pos_1LC = self.pos_embeds[str(int(L**0.5))]
         with torch.cuda.amp.autocast(enabled=False):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
             sos = cond_BD = self.class_emb(label_B)
@@ -293,6 +298,10 @@ class VAR(nn.Module):
                 if p.requires_grad:
                     s += p.view(-1)[0] * 0
             x_BLC[0, 0, 0] += s
+        # dummy grad for all pos_embeds so DDP doesn't see unused parameters
+        # (only one entry of pos_embeds is selected per forward based on L)
+        for p in self.pos_embeds.values():
+            x_BLC[0, 0, 0] += p.view(-1)[0] * 0
         return x_BLC    # logits BLV, V is vocab_size
     
     def init_weights(self, init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=0.02, conv_std_or_gain=0.02):
