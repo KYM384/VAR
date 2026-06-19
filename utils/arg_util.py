@@ -27,9 +27,13 @@ class Args(Tap):
     exp_name: str = 'text'
     
     # VAE
-    vfast: int = 0      # torch.compile VAE; =0: not compile; 1: compile with 'reduce-overhead'; 2: compile with 'max-autotune'
+    vfast: int = 0      # torch.compile VAE; =0: not compile; 1: 'reduce-overhead'; 2: 'max-autotune'; 3: 'default'.
+                        # NOTE: training tokenizes via vae.img_to_idxBl (not vae.forward), so compiling the VAE
+                        # does NOT accelerate the training path; left off by default. (Compiling the encoder is a
+                        # separate opt-in that can perturb the discrete tokens.)
     # VAR
-    tfast: int = 0      # torch.compile VAR; =0: not compile; 1: compile with 'reduce-overhead'; 2: compile with 'max-autotune'
+    tfast: int = 3      # torch.compile VAR; =0: not compile; 1: 'reduce-overhead'; 2: 'max-autotune'; 3: 'default'.
+                        # default 3 ('default' mode) is safe with this model's varying sequence lengths.
     depth: int = 16     # VAR depth
     # VAR initialization
     ini: float = -1     # -1: automated model parameter initialization
@@ -37,20 +41,31 @@ class Args(Tap):
     aln: float = 0.5    # the multiplier of ada_lin.w's initialization
     alng: float = 1e-5  # the multiplier of ada_lin.w[gamma channels]'s initialization
     # VAR optimization
-    fp16: int = 0           # 1: using fp16, 2: bf16
+    fp16: int = 2           # 0: fp32 (AMP off), 1: fp16 (+GradScaler), 2: bf16. Default bf16: best on A100
+                            # (native bf16, no GradScaler host-syncs, more stable than fp16).
     tblr: float = 1e-4      # base lr
     tlr: float = None       # lr = base lr * (bs / 256)
     twd: float = 0.05       # initial wd
     twde: float = 0         # final wd, =twde or twd
     tclip: float = 2.       # <=0 for not using grad clip
     ls: float = 0.0         # label smooth
-    
+
+    # frozen-VAE tokenization speed knobs (OPT-IN; default OFF because they can change the
+    # discrete VAE token ids that are the training targets — flip on only after a token-diff check)
+    fused_vae_encode: bool = False  # encode the blurred + clean images in ONE batched VAE forward
+                                    # (fewer kernel launches; tokens may shift due to batch-size-dependent
+                                    #  kernel selection / TF32 rounding)
+    vae_bf16: bool = False          # run the frozen VAE encode under bf16 autocast (faster; perturbs the
+                                    #  features before argmin, so tokens can shift)
+
     bs: int = 768           # global batch size
     batch_size: int = 0     # [automatically set; don't specify this] batch size per GPU = round(args.bs / args.ac / dist.get_world_size() / 8) * 8
     glb_batch_size: int = 0 # [automatically set; don't specify this] global batch size = args.batch_size * dist.get_world_size()
     ac: int = 1             # gradient accumulation
     
     ep: int = 250
+    val_freq: int = 5       # run validation (+ update best ckpt) every N epochs; 'last' ckpt is still
+                            # saved every epoch for crash-resume. Was effectively 1 (eval every epoch).
     wp: float = 0
     wp0: float = 0.005      # initial lr ratio at the begging of lr warm up
     wpe: float = 0.01       # final lr ratio at the end of training
@@ -71,7 +86,7 @@ class Args(Tap):
     data_load_reso: int = None  # [automatically set; don't specify this] would be max(patch_nums) * patch_size
     mid_reso: float = 1.125     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
     hflip: bool = False         # augmentation: horizontal flip
-    workers: int = 0        # num workers; 0: auto, -1: don't use multiprocessing in DataLoader
+    workers: int = 8        # num DataLoader workers per process (was 0 = single-process loading, a bottleneck)
     
     # would be automatically set in runtime
     cmd: str = ' '.join(sys.argv[1:])  # [automatically set; don't specify this]
@@ -130,11 +145,14 @@ class Args(Tap):
     dbg_nan: bool = False   # 'KEVIN_LOCAL' in os.environ
     
     def compile_model(self, m, fast):
-        import torch._inductor
-        torch._inductor.config.compile_threads = 1
-
         if fast == 0 or self.local_debug:
             return m
+        # The VAR transformer sees a small, fixed set of sequence lengths (one per blur level),
+        # so torch.compile specializes one graph per shape. Raise the recompilation cache limit
+        # (default 8) so all of them — plus partial eval batches — stay cached instead of falling
+        # back to eager once >8 distinct shapes have been seen.
+        import torch._dynamo
+        torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 32)
         return torch.compile(m, mode={
             1: 'reduce-overhead',
             2: 'max-autotune',

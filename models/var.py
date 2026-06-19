@@ -103,13 +103,20 @@ class VAR(nn.Module):
         K = 200
         sigmas = np.exp(np.linspace(np.log(SIGMA_MIN), np.log(SIGMA_MAX), K-1))
         sigmas = np.concatenate(([0.0], sigmas))
-        self.sigmas = 0.5 * torch.from_numpy(sigmas)**2
+        # Register sigmas/freqs as (non-persistent) buffers so `.to(device)` moves them
+        # onto the GPU. The per-step blur `exp(-sigma * freqs)` then runs on-device instead
+        # of on a single CPU thread (which previously stalled the GPU pipeline every step,
+        # followed by a blocking host->device copy). dtypes are kept exactly as before
+        # (sigmas: fp64, freqs: fp32) so the produced values are numerically unchanged.
+        # persistent=False: these are constants, so they are excluded from state_dict and
+        # old checkpoints still load under strict=True.
+        self.register_buffer('sigmas', 0.5 * torch.from_numpy(sigmas)**2, persistent=False)
 
         image_size = latent_size * patch_size
-        self.freqs = np.pi**2 * (
+        self.register_buffer('freqs', np.pi**2 * (
             torch.arange(image_size).view(1,-1) / image_size + \
             torch.arange(image_size).view(-1,1) / image_size
-        ).reshape(1,1,image_size,image_size)
+        ).reshape(1,1,image_size,image_size), persistent=False)
 
         self.pos_tC = nn.Parameter(torch.empty(K, self.C))
 
@@ -267,7 +274,7 @@ class VAR(nn.Module):
         B = x_BLCv_wo_first_l.shape[0]
         L = x_BLCv_wo_first_l.shape[1]
         pos_1LC = self.pos_embeds[str(int(L**0.5))]
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
             sos = cond_BD = self.class_emb(label_B)
             sos = sos.unsqueeze(1).expand(B, L, -1)
@@ -278,10 +285,10 @@ class VAR(nn.Module):
         
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
         
-        # hack: get the dtype if mixed precision is used
-        temp = x_BLC.new_ones(8, 8)
-        main_type = torch.matmul(temp, temp).dtype
-        
+        # get the compute dtype that mixed precision (autocast) will use, without the
+        # previous per-forward dummy 8x8 matmul.
+        main_type = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else x_BLC.dtype
+
         x_BLC = x_BLC.to(dtype=main_type)
         cond_BD_or_gss = cond_BD_or_gss.to(dtype=main_type)
         

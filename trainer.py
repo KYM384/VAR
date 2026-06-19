@@ -27,23 +27,65 @@ class VARTrainer(object):
         self, device, latent_size: int,
         vae_local: VQVAE, var_wo_ddp: VAR, var: DDP,
         var_opt: AmpOptimizer, label_smooth: float,
+        fused_vae_encode: bool = False, vae_bf16: bool = False,
     ):
         super(VARTrainer, self).__init__()
-        
+
         self.var, self.vae_local, self.quantize_local = var, vae_local, vae_local.quantize
         self.quantize_local: VectorQuantizer2
         self.var_wo_ddp: VAR = var_wo_ddp  # after torch.compile
         self.var_opt = var_opt
-        
+
         # del self.var_wo_ddp.rng
         self.var_wo_ddp.rng = torch.Generator(device=device)
-        
+
         self.label_smooth = label_smooth
         self.train_loss = nn.CrossEntropyLoss(label_smoothing=label_smooth, reduction='none')
         self.val_loss = nn.CrossEntropyLoss(label_smoothing=0.0, reduction='mean')
         self.L = latent_size * latent_size
         self.loss_weight = torch.ones(1, self.L, device=device) / self.L
-        
+        # opt-in tokenization speed knobs (see utils/arg_util.py); default off to keep tokens identical
+        self.fused_vae_encode = fused_vae_encode
+        self.vae_bf16 = vae_bf16
+
+    @torch.no_grad()
+    def fetch_blur_tokens(self, inp_B3HW: FTen):
+        """Apply the DCT frequency-blur curriculum and tokenize with the frozen VAE.
+
+        Shared by train_step and eval_ep so the (previously copy-pasted) logic stays in sync.
+        Returns: x_BLCv_wo_first_l (teacher-forcing input from the *blurred* image),
+                 gt_BL (target token ids from the *clean* low-pass image), t, weight.
+        The torch CPU RNG draw order (t_chunk, then t) is preserved exactly, so the random
+        blur schedule is unchanged from the original code.
+        """
+        var = self.var_wo_ddp
+        B = inp_B3HW.shape[0]
+        dev = inp_B3HW.device
+
+        t_chunk = torch.randint(0, 5, (1,)).item()
+        t_min = 90 + (180-90)//3 * (t_chunk-1) if t_chunk > 0 else 0
+        t_max = 90 + (180-90)//3 * (t_chunk) if t_chunk < 4 else len(var.sigmas)
+        t = torch.randint(t_min, t_max, (B,))
+        size = 256 // 2 ** int(t_chunk)
+        weight = (t_max - t_min) / ((180-90)//3)
+
+        # var.sigmas / var.freqs are now GPU buffers; t is kept on CPU (to preserve the RNG
+        # stream) and moved to the buffer's device only for indexing.
+        dct_B3HW = DCT(inp_B3HW)[:, :, :size, :size]
+        blur = (- var.sigmas[t.to(dev)].reshape(-1, 1, 1, 1) * var.freqs[:, :, :size, :size]).exp().to(dct_B3HW)
+        inp_B3HW_blured = iDCT(blur * dct_B3HW)
+        inp_B3HW_clean = iDCT(dct_B3HW)
+
+        with torch.autocast('cuda', dtype=torch.bfloat16, enabled=self.vae_bf16):
+            if self.fused_vae_encode:
+                both = self.vae_local.img_to_idxBl(torch.cat([inp_B3HW_blured, inp_B3HW_clean], dim=0))
+                gt_idx_Bl, gt_BL = both[:B], both[B:]
+            else:
+                gt_idx_Bl = self.vae_local.img_to_idxBl(inp_B3HW_blured)
+                gt_BL = self.vae_local.img_to_idxBl(inp_B3HW_clean)
+        x_BLCv_wo_first_l = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
+        return x_BLCv_wo_first_l, gt_BL, t, weight
+
     @torch.no_grad()
     def eval_ep(self, ld_val: DataLoader):
         tot = 0
@@ -56,23 +98,7 @@ class VARTrainer(object):
             inp_B3HW = inp_B3HW.to(dist.get_device(), non_blocking=True)
             label_B = label_B.to(dist.get_device(), non_blocking=True)
 
-            # DCT
-            t_chunk = torch.randint(0, 5, (1,)).item()
-            t_min = 90 + (180-90)//3 * (t_chunk-1) if t_chunk > 0 else 0
-            t_max = 90 + (180-90)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
-            t = torch.randint(t_min, t_max, (B,))
-            size = 256 // 2 ** int(t_chunk)
-            weight = (t_max - t_min) / ((180-90)//3)
-            dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
-            dct_B3HW_blured = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
-            inp_B3HW_blured = iDCT(dct_B3HW_blured)
-            inp_B3HW = iDCT(dct_B3HW)
-            
-            gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)
-            gt_BL = self.vae_local.img_to_idxBl(inp_B3HW)
-            x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
-            
-            self.var_wo_ddp.forward
+            x_BLCv_wo_first_l, gt_BL, t, weight = self.fetch_blur_tokens(inp_B3HW)
             logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l, t.to(x_BLCv_wo_first_l))
             L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B * weight
             L_tail += self.val_loss(logits_BLV.data.reshape(-1, V), gt_BL.reshape(-1)) * B * weight
@@ -96,25 +122,10 @@ class VARTrainer(object):
         B, V = label_B.shape[0], self.vae_local.vocab_size
         self.var.require_backward_grad_sync = stepping
 
-        # DCT
-        with torch.no_grad():
-            t_chunk = torch.randint(0, 5, (1,)).item()
-            t_min = 90 + (180-90)//3 * (t_chunk-1) if t_chunk > 0 else 0
-            t_max = 90 + (180-90)//3 * (t_chunk) if t_chunk < 4 else len(self.var_wo_ddp.sigmas)
-            t = torch.randint(t_min, t_max, (B,))
-            size = 256 // 2 ** int(t_chunk)
-            weight = (t_max - t_min) / ((180-90)//3)
-            dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
-            dct_B3HW_blured = (- self.var_wo_ddp.sigmas[t].reshape(-1,1,1,1) * self.var_wo_ddp.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
-            inp_B3HW_blured = iDCT(dct_B3HW_blured)
-            inp_B3HW = iDCT(dct_B3HW)
-            
-            gt_idx_Bl: ITen = self.vae_local.img_to_idxBl(inp_B3HW_blured)
-            gt_BL = self.vae_local.img_to_idxBl(inp_B3HW)
-            x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
-        
+        # DCT blur curriculum + frozen-VAE tokenization (no grad; handled in fetch_blur_tokens)
+        x_BLCv_wo_first_l, gt_BL, t, weight = self.fetch_blur_tokens(inp_B3HW)
+
         with self.var_opt.amp_ctx:
-            self.var_wo_ddp.forward
             logits_BLV = self.var(label_B, x_BLCv_wo_first_l, t.to(x_BLCv_wo_first_l))
             loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
             # lw = self.loss_weight
