@@ -151,8 +151,15 @@ class Args(Tap):
         # so torch.compile specializes one graph per shape. Raise the recompilation cache limit
         # (default 8) so all of them — plus partial eval batches — stay cached instead of falling
         # back to eager once >8 distinct shapes have been seen.
-        import torch._dynamo
+        import torch._dynamo, torch._inductor
         torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 32)
+        # Serialize Inductor compilation. Each of the (up to 8) ranks on an A100 node launches its
+        # own compile-worker pool; left at the default (~min(32, os.cpu_count()) workers per rank)
+        # the ranks collectively fork hundreds of processes/threads and exhaust the per-user limit
+        # (ulimit -u) inside the container -> "fork: Resource temporarily unavailable" /
+        # "pthread_create failed" -> BrokenProcessPool at the first compile. One worker per rank is
+        # plenty: compilation is a one-time startup cost and does not affect training throughput.
+        torch._inductor.config.compile_threads = 1
         return torch.compile(m, mode={
             1: 'reduce-overhead',
             2: 'max-autotune',
