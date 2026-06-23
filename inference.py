@@ -46,7 +46,6 @@ cfg = 2.0
 class_labels = tuple(range(num_classes))
 
 B = 9
-shifts = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0]
 
 dataset = build_dataset("/data", final_reso=256)[-1]
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=False, num_workers=4)
@@ -59,18 +58,13 @@ with torch.inference_mode(), torch.autocast("cuda", torch.float32):
         inp_B3HW = inp_B3HW.to(device)
         label_B = label_B.to(device)
 
-        recon_list = []
-        for shift in shifts:
-            recon_B3HW = var.autoregressive_infer_cfg(
-                B=B, label_B=label_B, inp_B3HW=inp_B3HW, cfg=cfg, top_k=600,
-                num_steps=10, shift=shift,
-                top_p=0.95, g_seed=0, more_smooth=False,
-            )
-            recon_list.append(recon_B3HW)
-
-        all_recon = torch.cat(recon_list, dim=0)
+        recon_B3HW = var.autoregressive_infer_cfg(
+            B=B, label_B=label_B, inp_B3HW=inp_B3HW, cfg=cfg, top_k=600,
+            num_steps=10, shift=1.0,
+            top_p=0.95, g_seed=0, more_smooth=False,
+        )
 
         torchvision.utils.save_image(
-            all_recon, f"generated.png", nrow=B, normalize=True, value_range=(0,1),
+            recon_B3HW, f"generated.png", nrow=B, normalize=True, value_range=(0,1),
         )
         break

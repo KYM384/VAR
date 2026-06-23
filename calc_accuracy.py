@@ -70,8 +70,11 @@ with torch.inference_mode(), torch.autocast("cuda", torch.bfloat16):
                 gt_BL = vae.img_to_idxBl(inp_B3HW.float())
                 x_BLCv_wo_first_l = vae.quantize.idxBl_to_var_input(gt_idx_Bl)
 
-            t_tensor = torch.tensor(t).reshape(1).repeat(x_BLCv_wo_first_l.size(0)).to(x_BLCv_wo_first_l)
-            logits_BLV = var(label_B, x_BLCv_wo_first_l, t_tensor)
+            # VAR.forward now takes an N-block sequence (t_seq, Ls); evaluate one block (N=1),
+            # whose block-causal mask is all-allowed == the previous full attention.
+            t_seq = torch.tensor([int(t)])
+            Ls = (x_BLCv_wo_first_l.shape[1],)
+            logits_BLV = var(label_B, x_BLCv_wo_first_l, t_seq, Ls)
 
             logits_flat = logits_BLV.data.view(-1, logits_BLV.size(-1))
             gt_flat = gt_BL.view(-1)
@@ -85,7 +88,7 @@ with torch.inference_mode(), torch.autocast("cuda", torch.bfloat16):
 
             del logits_BLV, logits_flat, gt_flat, loss_sum, pred_flat, dists
             del inp_B3HW_gt, inp_B3HW, inp_B3HW_blured, label_B
-            del gt_idx_Bl, gt_BL, x_BLCv_wo_first_l, t_tensor
+            del gt_idx_Bl, gt_BL, x_BLCv_wo_first_l, t_seq
 
         torch.cuda.empty_cache()
 

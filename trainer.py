@@ -47,44 +47,78 @@ class VARTrainer(object):
         # opt-in tokenization speed knobs (see utils/arg_util.py); default off to keep tokens identical
         self.fused_vae_encode = fused_vae_encode
         self.vae_bf16 = vae_bf16
+        # number of blur-decreasing steps in the autoregressive sequence (fixed for now)
+        self.N = 10
+
+    @staticmethod
+    def _t_to_size(t_int: int) -> int:
+        """Map a blur timestep to the spatial resolution, matching the previous chunking:
+        t in [0,90)->256, [90,120)->128, [120,150)->64, [150,180)->32, [180,...)->16."""
+        chunk = 0 if t_int < 90 else min(1 + (t_int - 90) // 30, 4)
+        return 256 // (2 ** chunk)
 
     @torch.no_grad()
     def fetch_blur_tokens(self, inp_B3HW: FTen):
-        """Apply the DCT frequency-blur curriculum and tokenize with the frozen VAE.
+        """Build an N-step *autoregressive* blur sequence and tokenize each step with the frozen VAE.
 
-        Shared by train_step and eval_ep so the (previously copy-pasted) logic stays in sync.
-        Returns: x_BLCv_wo_first_l (teacher-forcing input from the *blurred* image),
-                 gt_BL (target token ids from the *clean* low-pass image), t, weight.
-        The torch CPU RNG draw order (t_chunk, then t) is preserved exactly, so the random
-        blur schedule is unchanged from the original code.
+        Instead of a single blurred image, we draw one monotonically-decreasing blur schedule
+        (shared across the batch) and produce N images whose blur weakens from step 0 -> N-1
+        (block 0 is always t = K-1 = fully blurred / coarsest seed; blur weakens toward the finest block):
+
+          1. v = cumsum(softmax(randn(N)))           # monotone increasing in (0, 1]
+          2. t_seq = round(v * (K-1)).flip(0)         # monotone *decreasing* timesteps (most -> least blur)
+                                                      # v[-1]==1 then flipped -> block 0 t == K-1 (fully blurred seed)
+          3. for each t_i: resolution size_i (= _t_to_size), blur the low-pass DCT, tokenize.
+
+        Block 0 (coarsest, t=K-1, sos-only seed) is the generation root; the standard block-causal
+        mask (block i attends to blocks 0..i) then makes AR generation run coarse->fine, i.e. blur
+        weakens along the causal direction and each block attends to the more-blurred earlier steps.
+
+        Targets are the *clean* low-pass token ids at each step's resolution (N of them), exactly
+        as before. The per-step token grids are concatenated along the sequence dim; `Ls` records
+        the per-block token count so the model can rebuild per-block position/time embeddings and a
+        block-causal attention mask.
+
+        Returns: x_BLCv (B, sum(Ls), Cvae) teacher-forcing input from the *blurred* images,
+                 gt_BL (B, sum(Ls)) target ids from the *clean* low-pass images,
+                 Ls (tuple of N ints) per-block token counts,
+                 t_seq (N,) per-block timesteps.
         """
         var = self.var_wo_ddp
         B = inp_B3HW.shape[0]
-        dev = inp_B3HW.device
+        K = len(var.sigmas)
 
-        t_chunk = torch.randint(0, 5, (1,)).item()
-        t_min = 90 + (180-90)//3 * (t_chunk-1) if t_chunk > 0 else 0
-        t_max = 90 + (180-90)//3 * (t_chunk) if t_chunk < 4 else len(var.sigmas)
-        t = torch.randint(t_min, t_max, (B,))
-        size = 256 // 2 ** int(t_chunk)
-        weight = (t_max - t_min) / ((180-90)//3)
+        # 1-2. random monotone (decreasing-blur) timestep schedule, shared across the batch;
+        # the flip puts the forced v[-1]==1 endpoint at block 0 -> t==K-1 (fully blurred seed),
+        # so block 0 is always the most-blurred coarsest step and blur weakens along the sequence.
+        # kept on CPU; only python-int indices are used to index the GPU sigma/freq buffers.
+        v = torch.randn(self.N).softmax(dim=0).cumsum(dim=0)        # (N,), increasing in (0,1]
+        t_seq = (v * (K - 1)).round().long().flip(0)               # (N,), decreasing -> block 0 == K-1 (most blur)
 
-        # var.sigmas / var.freqs are now GPU buffers; t is kept on CPU (to preserve the RNG
-        # stream) and moved to the buffer's device only for indexing.
-        dct_B3HW = DCT(inp_B3HW)[:, :, :size, :size]
-        blur = (- var.sigmas[t.to(dev)].reshape(-1, 1, 1, 1) * var.freqs[:, :, :size, :size]).exp().to(dct_B3HW)
-        inp_B3HW_blured = iDCT(blur * dct_B3HW)
-        inp_B3HW_clean = iDCT(dct_B3HW)
+        # DCT once; each step slices the low-frequency square it can represent.
+        dct_full = DCT(inp_B3HW)
+        xs, gts, Ls = [], [], []
+        for i in range(self.N):
+            t_i = int(t_seq[i])
+            size = self._t_to_size(t_i)
+            dct = dct_full[:, :, :size, :size]
+            blur = (- var.sigmas[t_i] * var.freqs[:, :, :size, :size]).exp().to(dct)
+            inp_blured = iDCT(blur * dct)
+            inp_clean = iDCT(dct)
+            with torch.autocast('cuda', dtype=torch.bfloat16, enabled=self.vae_bf16):
+                if self.fused_vae_encode:
+                    both = self.vae_local.img_to_idxBl(torch.cat([inp_blured, inp_clean], dim=0))
+                    idx_blured, idx_clean = both[:B], both[B:]
+                else:
+                    idx_blured = self.vae_local.img_to_idxBl(inp_blured)
+                    idx_clean = self.vae_local.img_to_idxBl(inp_clean)
+            xs.append(self.quantize_local.idxBl_to_var_input(idx_blured))   # (B, L_i, Cvae)
+            gts.append(idx_clean)                                          # (B, L_i)
+            Ls.append(idx_clean.shape[1])
 
-        with torch.autocast('cuda', dtype=torch.bfloat16, enabled=self.vae_bf16):
-            if self.fused_vae_encode:
-                both = self.vae_local.img_to_idxBl(torch.cat([inp_B3HW_blured, inp_B3HW_clean], dim=0))
-                gt_idx_Bl, gt_BL = both[:B], both[B:]
-            else:
-                gt_idx_Bl = self.vae_local.img_to_idxBl(inp_B3HW_blured)
-                gt_BL = self.vae_local.img_to_idxBl(inp_B3HW_clean)
-        x_BLCv_wo_first_l = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
-        return x_BLCv_wo_first_l, gt_BL, t, weight
+        x_BLCv = torch.cat(xs, dim=1)
+        gt_BL = torch.cat(gts, dim=1)
+        return x_BLCv, gt_BL, tuple(Ls), t_seq
 
     @torch.no_grad()
     def eval_ep(self, ld_val: DataLoader):
@@ -98,12 +132,12 @@ class VARTrainer(object):
             inp_B3HW = inp_B3HW.to(dist.get_device(), non_blocking=True)
             label_B = label_B.to(dist.get_device(), non_blocking=True)
 
-            x_BLCv_wo_first_l, gt_BL, t, weight = self.fetch_blur_tokens(inp_B3HW)
-            logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l, t.to(x_BLCv_wo_first_l))
-            L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B * weight
-            L_tail += self.val_loss(logits_BLV.data.reshape(-1, V), gt_BL.reshape(-1)) * B * weight
+            x_BLCv, gt_BL, Ls, t_seq = self.fetch_blur_tokens(inp_B3HW)
+            logits_BLV = self.var_wo_ddp(label_B, x_BLCv, t_seq, Ls)
+            L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B
+            L_tail += self.val_loss(logits_BLV.data.reshape(-1, V), gt_BL.reshape(-1)) * B
             acc_mean += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100/gt_BL.shape[1])
-            acc_tail += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100)
+            acc_tail += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100/gt_BL.shape[1])
             tot += B
         self.var_wo_ddp.train(training)
         
@@ -123,14 +157,13 @@ class VARTrainer(object):
         self.var.require_backward_grad_sync = stepping
 
         # DCT blur curriculum + frozen-VAE tokenization (no grad; handled in fetch_blur_tokens)
-        x_BLCv_wo_first_l, gt_BL, t, weight = self.fetch_blur_tokens(inp_B3HW)
+        x_BLCv, gt_BL, Ls, t_seq = self.fetch_blur_tokens(inp_B3HW)
 
         with self.var_opt.amp_ctx:
-            logits_BLV = self.var(label_B, x_BLCv_wo_first_l, t.to(x_BLCv_wo_first_l))
+            logits_BLV = self.var(label_B, x_BLCv, t_seq, Ls)
             loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
-            # lw = self.loss_weight
-            # loss = loss.mul(lw).sum(dim=-1).mean()
-            loss = weight * loss.mean()
+            # mean cross-entropy over all tokens of the N-step sequence
+            loss = loss.mean()
         
         # backward
         grad_norm, scale_log2 = self.var_opt.backward_clip_step(loss=loss, stepping=stepping)

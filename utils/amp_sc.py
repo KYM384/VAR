@@ -65,8 +65,16 @@ class AmpOptimizer:
                     print(f'[scaler_sc = {scaler_sc}]\n' * 15, flush=True)
                     raise e
             else:
-                self.optimizer.step()
-            
+                # bf16 has no GradScaler to auto-skip on non-finite grads. Guard explicitly so a
+                # NaN/Inf from the forward/backward is not baked into the parameters (which would
+                # corrupt them permanently and keep the loss NaN every step). orig_norm is the
+                # pre-clip grad norm from early_clipping and is finite iff every grad is finite;
+                # it is still returned (as nan/inf) so the bad step is surfaced in the log.
+                if self.early_clipping and orig_norm is not None and not torch.isfinite(orig_norm):
+                    pass  # skip the update on non-finite grads
+                else:
+                    self.optimizer.step()
+
             if self.late_clipping:
                 orig_norm = self.optimizer.global_grad_norm
             

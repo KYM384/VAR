@@ -67,6 +67,13 @@ class VAR(nn.Module):
             str(side): nn.Parameter(torch.empty(1, side * side, self.C))
             for side in self.grid_sides
         })
+        # These are created with torch.empty (uninitialized memory). init_weights() only
+        # initializes nn.Module subtypes via self.modules() (Linear/Embedding/Norm/Conv) and
+        # never reaches the Parameters held inside an nn.ParameterDict, so they must be
+        # initialized here -- otherwise they stay as garbage (possibly NaN/Inf), get added into
+        # x_BLC every forward, and the loss is NaN from step 0.
+        for p in self.pos_embeds.values():
+            nn.init.trunc_normal_(p.data, mean=0, std=init_std)
         
         # 4. backbone blocks
         self.shared_ada_lin = nn.Sequential(nn.SiLU(inplace=False), SharedAdaLin(self.D, 6*self.C)) if shared_aln else nn.Identity()
@@ -119,6 +126,10 @@ class VAR(nn.Module):
         ).reshape(1,1,image_size,image_size), persistent=False)
 
         self.pos_tC = nn.Parameter(torch.empty(K, self.C))
+        # Same reason as pos_embeds above: a bare nn.Parameter is never visited by the
+        # self.modules() loop in init_weights(), so initialize it explicitly here (block 0 always
+        # injects pos_tC[K-1], so leaving it uninitialized guarantees a NaN seed at step 0).
+        nn.init.trunc_normal_(self.pos_tC.data, mean=0, std=init_std)
 
     def get_logits(self, h_or_h_and_residual: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], cond_BD: Optional[torch.Tensor]):
         if not isinstance(h_or_h_and_residual, torch.Tensor):
@@ -153,7 +164,7 @@ class VAR(nn.Module):
         if label_B is None:
             label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
         elif isinstance(label_B, int):
-            label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.pos_1LC.device)
+            label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.class_emb.weight.device)
         
         sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
         
@@ -166,8 +177,8 @@ class VAR(nn.Module):
 
         if num_steps is not None:
             # indces = torch.linspace(0, len(schedule)-1, num_steps).long()
-            # indces = torch.linspace(len(schedule)-70, len(schedule)-50, num_steps).long()
-            indces = torch.linspace(len(schedule)-200, len(schedule)-1, num_steps).long()
+            indces = torch.linspace(len(schedule)-70, len(schedule)-50, num_steps).long()
+            # indces = torch.linspace(len(schedule)-200, len(schedule)-1, num_steps).long()
             schedule = schedule[indces]
 
         t = schedule[0]
@@ -188,15 +199,25 @@ class VAR(nn.Module):
         pos_1LC = self.pos_embeds[str(size // 16)]
         next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
 
+        # Running history of per-block input embeddings (and their token counts Ls).
+        # Like the training forward(), the *entire* sequence built so far is fed every
+        # step under a block-causal mask (block i attends to blocks 0..i); only the
+        # current (last) block's logits are read out for sampling. This replaces the
+        # previous one-block-at-a-time inference, which discarded all earlier blocks.
+        hist_BLC = [next_token_map]
+        Ls = [next_token_map.shape[1]]
+
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
 
         for i in range(len(schedule)):
-            x = next_token_map
-            AdaLNSelfAttn.forward
+            L_cur = Ls[-1]
+            x = torch.cat(hist_BLC, dim=1)                                   # (2B, L_tot, C): all blocks so far
+            attn_bias = self._block_causal_bias(Ls, x.device).to(x.dtype)    # block-causal over the history
             for b in self.blocks:
-                x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-            logits_BlV = self.get_logits(x, cond_BD)
-            
+                x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=attn_bias)
+            logits_BLV = self.get_logits(x, cond_BD)                         # (2B, L_tot, V)
+            logits_BlV = logits_BLV[:, -L_cur:, :]                           # read out only the current (last) block
+
             logits_BlV = (1+cfg) * logits_BlV[:B] - cfg * logits_BlV[B:]
             
             idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
@@ -215,9 +236,6 @@ class VAR(nn.Module):
                 sigma_next = self.sigmas[t_next].reshape(1,1,1,1)
                 size = 256 // 2 ** (t_next - 90).div((180-90)/3).ceil().clip(0, 4).long().item()
                 print(size, t_next)
-                # if inp_B3HW_next.shape[2] != size:
-                #     inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
-                #     inp_B3HW_next = torch.nn.functional.interpolate(inp_B3HW_next, size=(size, size), mode="bilinear", align_corners=False)
                 dct_B3HW = DCT(inp_B3HW_next)[:,:,:size,:size]
                 if dct_B3HW.shape[2] != size:
                     dct_B3HW = torch.nn.functional.pad(dct_B3HW, (0, size - dct_B3HW.shape[3], 0, size - dct_B3HW.shape[2]))
@@ -237,6 +255,8 @@ class VAR(nn.Module):
                 next_token_map = next_token_map.repeat(2,1,1)
                 pos_1LC = self.pos_embeds[str(size // 16)]
                 next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
+                hist_BLC.append(next_token_map)                              # extend the history with the new block
+                Ls.append(next_token_map.shape[1])
 
             history.append( inp_B3HW_next.clone() )
 
@@ -264,37 +284,54 @@ class VAR(nn.Module):
         return emb
     """
 
-    def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor, t: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
+    def _block_causal_bias(self, Ls: Tuple[int, ...], device) -> torch.Tensor:
+        """Block-causal attention bias for the N-step sequence: a token in block i may attend to
+        every token in blocks 0..i (full attention within a block, causal across blocks).
+        Returns (1, 1, L_tot, L_tot) with 0 where allowed and -inf where masked."""
+        d = torch.cat([torch.full((L_i,), i, device=device) for i, L_i in enumerate(Ls)])  # (L_tot,) block idx
+        allowed = d.unsqueeze(1) >= d.unsqueeze(0)   # query (dim0) block >= key (dim1) block
+        bias = torch.where(allowed, 0., float('-inf'))
+        return bias.view(1, 1, d.shape[0], d.shape[0])
+
+    def forward(self, label_B: torch.LongTensor, x_BLCv: torch.Tensor, t_seq: torch.Tensor, Ls: Tuple[int, ...]) -> torch.Tensor:  # returns logits_BLV
         """
-        :param label_B: label_B
-        :param x_BLCv_wo_first_l: teacher forcing input (B, self.L, self.Cvae)
-        :param t: time step tensor (B,)
-        :return: logits BLV, V is vocab_size
+        :param label_B: class label (B,)
+        :param x_BLCv: teacher-forcing input, the N blur steps concatenated along L (B, sum(Ls), Cvae)
+        :param t_seq: per-block blur timesteps (N,), monotonically decreasing (block 0 == K-1, most-blurred seed)
+        :param Ls: per-block token counts (tuple of N ints); sum(Ls) == x_BLCv.shape[1]
+        :return: logits (B, sum(Ls), V), V is vocab_size; predictions are autoregressive across blocks
         """
-        B = x_BLCv_wo_first_l.shape[0]
-        L = x_BLCv_wo_first_l.shape[1]
-        pos_1LC = self.pos_embeds[str(int(L**0.5))]
+        B = x_BLCv.shape[0]
         with torch.amp.autocast('cuda', enabled=False):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
-            sos = cond_BD = self.class_emb(label_B)
-            sos = sos.unsqueeze(1).expand(B, L, -1)
-            # sos = self.time_emb(self.get_time_embedding(t)).unsqueeze(1) + sos
-            sos = self.pos_tC[t.long()].unsqueeze(1) + sos
-            x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + pos_1LC
-            x_BLC = torch.where(t.view(B,1,1) == len(self.sigmas)-1, sos, x_BLC)
-        
+            sos = cond_BD = self.class_emb(label_B)   # (B, C)
+            # per-block embedding: word_embed(blurred tokens) + class + time(blur level) + position
+            parts, offset = [], 0
+            for i, L_i in enumerate(Ls):
+                xc = x_BLCv[:, offset:offset + L_i]                          # (B, L_i, Cvae)
+                offset += L_i
+                pos_1LC = self.pos_embeds[str(int(L_i ** 0.5))]             # (1, L_i, C)
+                temb = self.pos_tC[int(t_seq[i])].view(1, 1, -1)           # (1, 1, C)
+                sos_i = sos.unsqueeze(1) + temb                            # (B, 1, C) broadcast over L_i
+                if int(t_seq[i]) == len(self.sigmas) - 1:                  # fully blurred: class+time only
+                    parts.append(sos_i.expand(B, L_i, -1))
+                else:
+                    parts.append(self.word_embed(xc) + sos_i + pos_1LC)
+            x_BLC = torch.cat(parts, dim=1)                                # (B, L_tot, C)
+
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
-        
+
         # get the compute dtype that mixed precision (autocast) will use, without the
         # previous per-forward dummy 8x8 matmul.
         main_type = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else x_BLC.dtype
 
         x_BLC = x_BLC.to(dtype=main_type)
         cond_BD_or_gss = cond_BD_or_gss.to(dtype=main_type)
-        
+        attn_bias = self._block_causal_bias(Ls, x_BLC.device).to(dtype=main_type)
+
         AdaLNSelfAttn.forward
         for i, b in enumerate(self.blocks):
-            x_BLC = b(x=x_BLC, cond_BD=cond_BD_or_gss, attn_bias=None)
+            x_BLC = b(x=x_BLC, cond_BD=cond_BD_or_gss, attn_bias=attn_bias)
         x_BLC = self.get_logits(x_BLC.float(), cond_BD)
         
         if isinstance(self.word_embed, nn.Linear):
