@@ -239,10 +239,12 @@ class VAR(nn.Module):
                 dct_B3HW = DCT(inp_B3HW_next)[:,:,:size,:size]
                 if dct_B3HW.shape[2] != size:
                     dct_B3HW = torch.nn.functional.pad(dct_B3HW, (0, size - dct_B3HW.shape[3], 0, size - dct_B3HW.shape[2]))
-                diff = (- sigma_next * self.freqs[:,:,:size,:size]).exp() - (- sigma * self.freqs[:,:,:size,:size]).exp()
-                dct_B3HW = diff.to(dct_B3HW) * dct_B3HW
-                dct_B3HW[:,:,:inp_B3HW.shape[2],:inp_B3HW.shape[3]] += DCT(inp_B3HW)
-                inp_B3HW_next = iDCT(dct_B3HW).float() # + inp_B3HW
+                # Use the prediction alone as the next input: blur the decoded
+                # image to the next (weaker) blur level t_next, instead of
+                # keeping the previous input's low frequencies and only taking
+                # the newly-revealed high-frequency band from the prediction.
+                dct_B3HW = (- sigma_next * self.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
+                inp_B3HW_next = iDCT(dct_B3HW).float()
 
                 inp_B3HW = inp_B3HW_next.clone()
                 t = t_next.clone()
