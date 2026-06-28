@@ -113,6 +113,13 @@ class VAR(nn.Module):
         self.register_buffer('sigmas', 0.5 * torch.from_numpy(sigmas)**2, persistent=False)
 
         image_size = latent_size * patch_size
+        # The DCT blur curriculum and the _t_to_size schedule assume 256x256 images (freqs is
+        # sliced [:size] for size up to 256). arg_util/build_vae_var default patch_size=2 ->
+        # image_size=32, which would silently clip; fail loudly if patch_size=16 was not passed.
+        assert image_size == 256, (
+            f"VAR expects latent_size*patch_size == 256 (got {latent_size}*{patch_size}={image_size}); "
+            f"pass patch_size=16 (the default is 2)."
+        )
         self.register_buffer('freqs', np.pi**2 * (
             torch.arange(image_size).view(1,-1) / image_size + \
             torch.arange(image_size).view(-1,1) / image_size
@@ -127,7 +134,16 @@ class VAR(nn.Module):
         else:                               # fused_add_norm is not used
             h = h_or_h_and_residual
         return self.head(self.head_nm(h.float(), cond_BD).float()).float()
-    
+
+    @staticmethod
+    def _t_to_size(t_int: int) -> int:
+        """Blur timestep -> spatial resolution, matching the training chunk schedule in
+        trainer.fetch_blur_tokens (half-open intervals): t<90 ->256, [90,120) ->128,
+        [120,150) ->64, [150,180) ->32, >=180 ->16. The previous ceil-based formula was
+        off-by-one at the exact boundaries t in {90,120,150,180} (it gave a larger size)."""
+        chunk = 0 if t_int < 90 else min(1 + (int(t_int) - 90) // 30, 4)
+        return 256 // (2 ** chunk)
+
     @torch.no_grad()
     def autoregressive_infer_cfg(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
@@ -153,7 +169,7 @@ class VAR(nn.Module):
         if label_B is None:
             label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
         elif isinstance(label_B, int):
-            label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.pos_1LC.device)
+            label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.pos_tC.device)
         
         sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
         
@@ -166,12 +182,12 @@ class VAR(nn.Module):
 
         if num_steps is not None:
             # indces = torch.linspace(0, len(schedule)-1, num_steps).long()
-            # indces = torch.linspace(len(schedule)-70, len(schedule)-50, num_steps).long()
-            indces = torch.linspace(len(schedule)-200, len(schedule)-1, num_steps).long()
+            indces = torch.linspace(len(schedule)-100, len(schedule)-50, num_steps).long()
+            # indces = torch.linspace(len(schedule)-200, len(schedule)-1, num_steps).long()
             schedule = schedule[indces]
 
         t = schedule[0]
-        size = 256 // 2 ** (t - 90).div((180-90)/3).ceil().clip(0, 4).long().item()
+        size = self._t_to_size(int(t))
         print(f"start size = {size}")
         # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
         temb = self.pos_tC[t].reshape(1, 1, -1)
@@ -179,14 +195,23 @@ class VAR(nn.Module):
         # inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
         dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
         dct_B3HW = (- sigma * self.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
-        inp_B3HW = iDCT(dct_B3HW).float()
+        # amplitude-preserving low-pass: undo the 256/size DCT-crop amplification so the VAE
+        # sees in-range [-1,1] images (consistent with training).
+        inp_B3HW = (iDCT(dct_B3HW) * (size / 256)).float()
         # inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
         history = [ inp_B3HW.clone() ]
         next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
         next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
         next_token_map = next_token_map.repeat(2,1,1)
         pos_1LC = self.pos_embeds[str(size // 16)]
-        next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
+        if int(t) == len(self.sigmas) - 1:
+            # maximal-blur seed: mirror VAR.forward's torch.where(t==len(sigmas)-1, sos, x_BLC).
+            # At t=K-1 the model is trained on a class+time-only seed (word_embed and the
+            # position embeddings are dropped), so feeding the blurred image tokens here would
+            # be off-distribution.
+            next_token_map = sos.unsqueeze(1).expand(-1, pos_1LC.shape[1], -1) + temb
+        else:
+            next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
 
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
 
@@ -211,24 +236,22 @@ class VAR(nn.Module):
             inp_B3HW_next = self.vae_proxy[0].fhat_to_img(h_BChw).float()
             history.append( inp_B3HW_next.clone() )
             if i < len(schedule) - 1:
+                prev_size = size                       # resolution of the current block (s_prev)
                 t_next = schedule[i+1]
                 sigma_next = self.sigmas[t_next].reshape(1,1,1,1)
-                size = 256 // 2 ** (t_next - 90).div((180-90)/3).ceil().clip(0, 4).long().item()
+                size = self._t_to_size(int(t_next))
                 print(size, t_next)
-                # if inp_B3HW_next.shape[2] != size:
-                #     inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
-                #     inp_B3HW_next = torch.nn.functional.interpolate(inp_B3HW_next, size=(size, size), mode="bilinear", align_corners=False)
                 dct_B3HW = DCT(inp_B3HW_next)[:,:,:size,:size]
                 if dct_B3HW.shape[2] != size:
                     dct_B3HW = torch.nn.functional.pad(dct_B3HW, (0, size - dct_B3HW.shape[3], 0, size - dct_B3HW.shape[2]))
-                diff = (- sigma_next * self.freqs[:,:,:size,:size]).exp() - (- sigma * self.freqs[:,:,:size,:size]).exp()
-                dct_B3HW = diff.to(dct_B3HW) * dct_B3HW
-                dct_B3HW[:,:,:inp_B3HW.shape[2],:inp_B3HW.shape[3]] += DCT(inp_B3HW)
-                inp_B3HW_next = iDCT(dct_B3HW).float() # + inp_B3HW
+                # Blur the previous step's decoded output to the next (weaker) blur level and use
+                # it directly as the next input -- no band re-addition from the previous input.
+                # DCT(inp_B3HW_next) is prev_size-band-limited; inverse-transforming on the size grid
+                # scales amplitude by prev_size/size, so multiply by size/prev_size to preserve it.
+                dct_B3HW = (- sigma_next * self.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
+                inp_B3HW_next = (iDCT(dct_B3HW) * (size / prev_size)).float()
 
-                inp_B3HW = inp_B3HW_next.clone()
                 t = t_next.clone()
-                sigma = sigma_next.clone()
                 # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
                 temb = self.pos_tC[t].reshape(1, 1, -1)
 
@@ -236,14 +259,18 @@ class VAR(nn.Module):
                 next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
                 next_token_map = next_token_map.repeat(2,1,1)
                 pos_1LC = self.pos_embeds[str(size // 16)]
-                next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
+                if int(t) == len(self.sigmas) - 1:
+                    # maximal-blur seed (see step-0 note): class+time only, matching VAR.forward.
+                    next_token_map = sos.unsqueeze(1).expand(-1, pos_1LC.shape[1], -1) + temb
+                else:
+                    next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
 
             history.append( inp_B3HW_next.clone() )
 
         import torchvision
         history = [ torch.nn.functional.interpolate(h, size=(256, 256), mode="bilinear", align_corners=False) for h in history ]
         torchvision.utils.save_image(
-            torch.cat(history), "generated2.png", normalize=True, nrow=len(inp_B3HW), value_range=(-1,1),
+            torch.cat(history), "generated2.png", normalize=True, nrow=B, value_range=(-1,1),
         )
 
         for b in self.blocks: b.attn.kv_caching(False)

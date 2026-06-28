@@ -57,12 +57,17 @@ with torch.inference_mode(), torch.autocast("cuda", torch.bfloat16):
             inp_B3HW_gt = inp_B3HW.to(device)
             label_B = label_B.to(device)
 
-            t_chunk = 0 if t < 70 else min(4, 1 + (int(t) - 70) // 20)
+            # blur timestep -> resolution chunk, matching trainer.fetch_blur_tokens
+            # (chunk0: t<90 ->256, [90,120) ->128, [120,150) ->64, [150,180) ->32, >=180 ->16)
+            t_chunk = 0 if t < 90 else min(4, 1 + (int(t) - 90) // 30)
             size = 256 // 2 ** int(t_chunk)
             dct_B3HW = DCT(inp_B3HW_gt)[:,:,:size,:size]
             dct_B3HW_blured = (- var.sigmas[t].reshape(-1,1,1,1) * var.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
-            inp_B3HW_blured = iDCT(dct_B3HW_blured)
-            inp_B3HW = iDCT(dct_B3HW)
+            # re-normalize the cropped iDCT by size/256 (amplitude-preserving low-pass) so the
+            # frozen VAE sees in-range [-1,1] images -- consistent with training/generation.
+            scale = size / 256
+            inp_B3HW_blured = iDCT(dct_B3HW_blured) * scale
+            inp_B3HW = iDCT(dct_B3HW) * scale
             del dct_B3HW, dct_B3HW_blured
 
             with torch.autocast("cuda", enabled=False):

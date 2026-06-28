@@ -42,11 +42,18 @@ ckpt = torch.load("local_output/ar-ckpt-last.pth")["trainer"]
 vae.load_state_dict(ckpt["vae_local"])
 var.load_state_dict(ckpt["var_wo_ddp"])
 
+# build_vae_var leaves VAR in training mode (nn.Module default); torch.inference_mode()
+# / no_grad do NOT change .training, so without this DropPath (stochastic depth) stays
+# active during sampling and randomizes the output. VAE is already eval via test_mode,
+# but call it explicitly for clarity.
+vae.eval()
+var.eval()
+
 cfg = 2.0
 class_labels = tuple(range(num_classes))
 
 B = 9
-shifts = [0.25, 0.5, 1.0, 1.5, 2.0, 3.0]
+shifts = [1.0]
 
 dataset = build_dataset("/data", final_reso=256)[-1]
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=False, num_workers=4)
