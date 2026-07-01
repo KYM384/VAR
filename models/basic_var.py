@@ -95,12 +95,17 @@ class SelfAttention(nn.Module):
         # qkv: BL3Hc
         
         using_flash = self.using_flash and attn_bias is None and qkv.dtype != torch.float32
-        if using_flash or self.using_xform: q, k, v = qkv.unbind(dim=2); dim_cat = 1   # q or k or v: BLHc
+        # xformers' dense attn_bias path is fragile (shape/contiguity/alignment) and flash does not
+        # take an additive float mask; when a mask is supplied (mixed-resolution training) fall
+        # through to SDPA/slow_attn, which robustly broadcasts an additive float mask of shape
+        # (B,1,1,L). With attn_bias=None (inference / single-resolution) flash/xformers are kept.
+        using_xform = self.using_xform and attn_bias is None
+        if using_flash or using_xform: q, k, v = qkv.unbind(dim=2); dim_cat = 1   # q or k or v: BLHc
         else: q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0); dim_cat = 2               # q or k or v: BHLc
-        
+
         if self.attn_l2_norm:
             scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
-            if using_flash or self.using_xform: scale_mul = scale_mul.transpose(1, 2)  # 1H11 to 11H1
+            if using_flash or using_xform: scale_mul = scale_mul.transpose(1, 2)  # 1H11 to 11H1
             q = F.normalize(q, dim=-1).mul(scale_mul)
             k = F.normalize(k, dim=-1)
         
@@ -111,7 +116,7 @@ class SelfAttention(nn.Module):
         dropout_p = self.attn_drop if self.training else 0.0
         if using_flash:
             oup = flash_attn_func(q.to(dtype=main_type), k.to(dtype=main_type), v.to(dtype=main_type), dropout_p=dropout_p, softmax_scale=self.scale).view(B, L, C)
-        elif self.using_xform:
+        elif using_xform:
             oup = memory_efficient_attention(q.to(dtype=main_type), k.to(dtype=main_type), v.to(dtype=main_type), attn_bias=None if attn_bias is None else attn_bias.to(dtype=main_type).expand(B, self.num_heads, -1, -1), p=dropout_p, scale=self.scale).view(B, L, C)
         else:
             oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias, dropout_p=dropout_p).transpose(1, 2).reshape(B, L, C)

@@ -291,37 +291,67 @@ class VAR(nn.Module):
         return emb
     """
 
-    def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor, t: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
+    def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor, t: torch.Tensor, attn_bias: Optional[torch.Tensor] = None) -> torch.Tensor:  # returns logits_BLV
         """
         :param label_B: label_B
-        :param x_BLCv_wo_first_l: teacher forcing input (B, self.L, self.Cvae)
+        :param x_BLCv_wo_first_l: teacher forcing input (B, L, self.Cvae). For mixed-resolution
+            training L == self.L (= L_max) and shorter grids are right-padded with dummy tokens.
         :param t: time step tensor (B,)
+        :param attn_bias: optional additive attention mask (B, 1, 1, L). None => full attention over
+            all L tokens (single-resolution batch, e.g. the eval scripts). When given, each sample
+            attends only to its own real tokens (padding keys = -inf), which is how a minibatch with
+            per-sample sizes is supported.
         :return: logits BLV, V is vocab_size
         """
         B = x_BLCv_wo_first_l.shape[0]
         L = x_BLCv_wo_first_l.shape[1]
-        pos_1LC = self.pos_embeds[str(int(L**0.5))]
         with torch.amp.autocast('cuda', enabled=False):
             label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
             sos = cond_BD = self.class_emb(label_B)
             sos = sos.unsqueeze(1).expand(B, L, -1)
             # sos = self.time_emb(self.get_time_embedding(t)).unsqueeze(1) + sos
             sos = self.pos_tC[t.long()].unsqueeze(1) + sos
-            x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + pos_1LC
+
+            if attn_bias is None:
+                # single-resolution batch: every sample shares one grid -> one pos-embed
+                pos_BLC = self.pos_embeds[str(int(round(L ** 0.5)))]
+            else:
+                # mixed-resolution batch: the grid varies per sample, so gather the right pos-embed
+                # by each sample's blur chunk. Build a (num_chunks, L, C) table whose row c holds
+                # chunk c's grid pos-embed zero-padded to L; dummy/padding positions get a zero
+                # pos-embed and are masked out by attn_bias + the loss token_mask. Stacking ALL
+                # pos_embeds also means every one gets a (possibly zero) grad, so DDP never sees
+                # them as unused.
+                t_long = t.long()
+                chunk = torch.where(
+                    t_long < 90, torch.zeros_like(t_long),
+                    torch.clamp(1 + (t_long - 90) // 30, max=len(self.grid_sides) - 1),
+                )
+                pos_rows = []
+                for side in reversed(self.grid_sides):   # [16, 8, 4, 2, 1] == chunk 0 .. last
+                    p = self.pos_embeds[str(side)][0]    # (side*side, C)
+                    if p.shape[0] < L:
+                        p = torch.cat([p, p.new_zeros(L - p.shape[0], self.C)], dim=0)
+                    pos_rows.append(p)
+                pos_BLC = torch.stack(pos_rows, dim=0)[chunk]   # (B, L, C)
+
+            x_BLC = self.word_embed(x_BLCv_wo_first_l) + sos + pos_BLC
             x_BLC = torch.where(t.view(B,1,1) == len(self.sigmas)-1, sos, x_BLC)
-        
+
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
-        
+
         # get the compute dtype that mixed precision (autocast) will use, without the
         # previous per-forward dummy 8x8 matmul.
         main_type = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else x_BLC.dtype
 
         x_BLC = x_BLC.to(dtype=main_type)
         cond_BD_or_gss = cond_BD_or_gss.to(dtype=main_type)
-        
+        if attn_bias is not None:
+            attn_bias = attn_bias.to(dtype=main_type)
+
         AdaLNSelfAttn.forward
         for i, b in enumerate(self.blocks):
-            x_BLC = b(x=x_BLC, cond_BD=cond_BD_or_gss, attn_bias=None)
+            x_BLC = b(x=x_BLC, cond_BD=cond_BD_or_gss, attn_bias=attn_bias)
         x_BLC = self.get_logits(x_BLC.float(), cond_BD)
         
         if isinstance(self.word_embed, nn.Linear):
@@ -332,8 +362,9 @@ class VAR(nn.Module):
                 if p.requires_grad:
                     s += p.view(-1)[0] * 0
             x_BLC[0, 0, 0] += s
-        # dummy grad for all pos_embeds so DDP doesn't see unused parameters
-        # (only one entry of pos_embeds is selected per forward based on L)
+        # dummy grad so DDP never sees unused pos_embeds. Single-resolution forwards select only
+        # one entry; the mixed-resolution path already grads all of them via the stacked table, so
+        # this is belt-and-suspenders.
         for p in self.pos_embeds.values():
             x_BLC[0, 0, 0] += p.view(-1)[0] * 0
         return x_BLC    # logits BLV, V is vocab_size
