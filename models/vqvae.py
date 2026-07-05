@@ -66,9 +66,22 @@ class VQVAE(nn.Module):
     def fhat_to_img(self, f_hat: torch.Tensor):
         return self.decoder(self.post_quant_conv(f_hat)).clamp_(-1, 1)
     
+    def img_to_f(self, inp_img_no_grad: torch.Tensor) -> torch.Tensor:   # (B, Cvae, h, w) pre-quantization features
+        return self.quant_conv(self.encoder(inp_img_no_grad))
+
     def img_to_idxBl(self, inp_img_no_grad: torch.Tensor) -> List[torch.LongTensor]:    # return List[Bl]
-        f = self.quant_conv(self.encoder(inp_img_no_grad))
+        f = self.img_to_f(inp_img_no_grad)
         return self.quantize.f_to_idxBl_or_fhat(f, to_fhat=False)
+
+    def img_to_var_input(self, inp_img_no_grad: torch.Tensor) -> torch.Tensor:
+        """Continuous VAR input: encoder features with quantization skipped, (B, L, Cvae).
+
+        Same shape and token order (row-major over the h x w grid) as
+        quantize.idxBl_to_var_input(img_to_idxBl(img)), so it is a drop-in replacement that
+        avoids the input-side quantization error. Loss targets still use img_to_idxBl.
+        """
+        f = self.img_to_f(inp_img_no_grad)
+        return f.permute(0, 2, 3, 1).reshape(f.shape[0], -1, self.Cvae).detach()
     
     def img_to_reconstructed_img(self, x, last_one=False) -> List[torch.Tensor]:
         f = self.quant_conv(self.encoder(x))

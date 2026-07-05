@@ -28,7 +28,7 @@ class Args(Tap):
     
     # VAE
     vfast: int = 0      # torch.compile VAE; =0: not compile; 1: 'reduce-overhead'; 2: 'max-autotune'; 3: 'default'.
-                        # NOTE: training tokenizes via vae.img_to_idxBl (not vae.forward), so compiling the VAE
+                        # NOTE: training encodes via vae.img_to_f (not vae.forward), so compiling the VAE
                         # does NOT accelerate the training path; left off by default. (Compiling the encoder is a
                         # separate opt-in that can perturb the discrete tokens.)
     # VAR

@@ -59,7 +59,8 @@ class VARTrainer(object):
         fixed L_max sequence while each image effectively keeps its own resolution.
 
         Returns:
-            x_BLCv     (B, L_max, Cvae)  teacher-forcing input from the *blurred* image
+            x_BLCv     (B, L_max, Cvae)  teacher-forcing input from the *blurred* image:
+                                         continuous encoder features, quantization skipped
             gt_BL      (B, L_max)        target token ids from the *clean* low-pass image
                                          (dummy/padding positions = 0; masked out in the loss)
             t          (B,)             per-sample blur timestep (CPU long)
@@ -96,12 +97,14 @@ class VARTrainer(object):
             clean = iDCT(dct) * scale
             with torch.autocast('cuda', dtype=torch.bfloat16, enabled=self.vae_bf16):
                 if self.fused_vae_encode:
-                    both = self.vae_local.img_to_idxBl(torch.cat([blured, clean], dim=0))
-                    gt_idx_Bl, gt_sub = both[:len(sel)], both[len(sel):]
+                    f_both = self.vae_local.img_to_f(torch.cat([blured, clean], dim=0))
+                    f_blur, f_clean = f_both[:len(sel)], f_both[len(sel):]
                 else:
-                    gt_idx_Bl = self.vae_local.img_to_idxBl(blured)
-                    gt_sub = self.vae_local.img_to_idxBl(clean)
-            x_sub = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)   # (len(sel), Lg, Cvae)
+                    f_blur = self.vae_local.img_to_f(blured)
+                    f_clean = self.vae_local.img_to_f(clean)
+                # targets stay quantized (CE over the codebook); only the input skips quantization
+                gt_sub = self.quantize_local.f_to_idxBl_or_fhat(f_clean, to_fhat=False)
+            x_sub = f_blur.permute(0, 2, 3, 1).reshape(len(sel), Lg, Cvae)   # (len(sel), Lg, Cvae) continuous
             x_BLCv[sel, :Lg] = x_sub.to(x_BLCv.dtype)
             gt_BL[sel, :Lg] = gt_sub
             token_mask[sel, :Lg] = True

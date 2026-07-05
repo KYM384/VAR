@@ -102,10 +102,9 @@ if local_rank == 0:
             inp_blured = (iDCT(blur * dct_B3HW) * scale).float()   # blurred input  (B,3,size,size)
             inp_clean = (iDCT(dct_B3HW) * scale).float()           # clean low-pass = teacher-forcing target
 
-            # --- tokenize the blurred image with the frozen VAE (fp32) ---
+            # --- encode the blurred image with the frozen VAE (fp32, no quantization) ---
             with torch.autocast("cuda", enabled=False):
-                gt_idx_Bl = vae.img_to_idxBl(inp_blured)                 # (B, L)
-                x_BLCv = vae.quantize.idxBl_to_var_input(gt_idx_Bl)      # (B, L, Cvae)
+                x_BLCv = vae.img_to_var_input(inp_blured)                # (B, L, Cvae) continuous
 
             # --- single teacher-forcing forward through the Transformer (no CFG) ---
             # This branch's VAR.forward takes a per-sample timestep tensor (B,), one t per

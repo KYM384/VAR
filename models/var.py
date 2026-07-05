@@ -200,8 +200,8 @@ class VAR(nn.Module):
         inp_B3HW = (iDCT(dct_B3HW) * (size / 256)).float()
         # inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
         history = [ inp_B3HW.clone() ]
-        next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
-        next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
+        # continuous encoder features (no input-side quantization), matching training
+        next_token_map = self.vae_proxy[0].img_to_var_input(inp_B3HW).float()
         next_token_map = next_token_map.repeat(2,1,1)
         pos_1LC = self.pos_embeds[str(size // 16)]
         if int(t) == len(self.sigmas) - 1:
@@ -255,8 +255,7 @@ class VAR(nn.Module):
                 # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
                 temb = self.pos_tC[t].reshape(1, 1, -1)
 
-                next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW_next).long()
-                next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
+                next_token_map = self.vae_proxy[0].img_to_var_input(inp_B3HW_next).float()
                 next_token_map = next_token_map.repeat(2,1,1)
                 pos_1LC = self.pos_embeds[str(size // 16)]
                 if int(t) == len(self.sigmas) - 1:
