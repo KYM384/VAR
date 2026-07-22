@@ -120,9 +120,12 @@ class VAR(nn.Module):
             f"VAR expects latent_size*patch_size == 256 (got {latent_size}*{patch_size}={image_size}); "
             f"pass patch_size=16 (the default is 2)."
         )
+        # Quadratic (exact heat-kernel) spectrum: exp(-sigmas[t] * freqs) is then a true
+        # Gaussian blur with std sigma_t PIXELS, matching the chunk schedule's design rule
+        # (sigma * size ~ const) and the prototype in test_decode_blured.py.
         self.register_buffer('freqs', np.pi**2 * (
-            torch.arange(image_size).view(1,-1) / image_size + \
-            torch.arange(image_size).view(-1,1) / image_size
+            (torch.arange(image_size).view(1,-1) / image_size) ** 2 + \
+            (torch.arange(image_size).view(-1,1) / image_size) ** 2
         ).reshape(1,1,image_size,image_size), persistent=False)
 
         self.pos_tC = nn.Parameter(torch.empty(K, self.C))
@@ -144,23 +147,78 @@ class VAR(nn.Module):
         chunk = 0 if t_int < 90 else min(1 + (int(t_int) - 90) // 30, 4)
         return 256 // (2 ** chunk)
 
+    def build_schedule(
+        self, num_steps: Optional[int] = None, shift: Optional[float] = None,
+        full_range: bool = False, t_schedule: Optional[Union[list, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Return the exact sequence of timesteps autoregressive_infer_cfg will execute
+        (CPU long tensor, trailing t=0 entries already dropped). Callers can use this to
+        log the executed steps without running the sampler."""
+        if t_schedule is not None:
+            # explicit (e.g. DP-computed) schedule: overrides shift/num_steps/full_range.
+            # A trailing t=0 is allowed and dropped by the filter below, like any schedule.
+            schedule = torch.as_tensor(t_schedule, dtype=torch.long).reshape(-1)
+            assert len(schedule) > 0, "t_schedule is empty"
+            assert (schedule[:-1] > schedule[1:]).all(), "t_schedule must be strictly decreasing"
+            assert 0 <= int(schedule[-1]) and int(schedule[0]) <= len(self.sigmas) - 1, "t_schedule out of range"
+        else:
+            schedule = torch.flip(torch.arange(len(self.sigmas)), dims=[0])
+            if shift is not None:
+                M = schedule.max()
+                schedule = schedule / M
+                schedule = shift * schedule / (1 + (shift - 1) * schedule)
+                schedule = (schedule * M).long()
+
+            if num_steps is not None:
+                if full_range:
+                    indces = torch.linspace(0, len(schedule)-1, num_steps).long()
+                else:
+                    indces = torch.linspace(len(schedule)-100, len(schedule)-50, num_steps).long()
+                # indces = torch.linspace(len(schedule)-200, len(schedule)-1, num_steps).long()
+                schedule = schedule[indces]
+
+        # Stop as soon as the NEXT time would be t=0: drop the trailing t=0 entries so the
+        # last executed step is the smallest nonzero t and its decoded output is returned
+        # as-is (the t=0 forward regenerates from class only and destroys the image).
+        # NOTE: this shortens the step count by one when the schedule ends at 0 — e.g.
+        # num_steps=10 with full_range now runs 9 steps (t=199..23); pass num_steps+1 to
+        # keep the same number of executed steps.
+        schedule = schedule[schedule != 0]
+        return schedule
+
     @torch.no_grad()
     def autoregressive_infer_cfg(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
-        inp_B3HW: torch.Tensor,
+        inp_B3HW: Optional[torch.Tensor],
         num_steps: Optional[int] = None, shift: [Optional[float]] = None,
         g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
         more_smooth=False,
+        full_range: bool = False, verbose: bool = True,
+        save_history: Optional[str] = "generated2.png",
+        t_schedule: Optional[Union[list, torch.Tensor]] = None,
     ) -> torch.Tensor:   # returns reconstructed image (B, 3, H, W) in [0, 1]
         """
         only used for inference, on autoregressive mode
         :param B: batch size
         :param label_B: imagenet label; if None, randomly sampled
+        :param inp_B3HW: image the schedule starts from (blurred to schedule[0]'s level).
+            May be None ONLY when the schedule starts at maximal blur t=K-1 (i.e.
+            full_range=True or num_steps=None): there the seed is class+time-only and any
+            input would be ignored anyway -> pure class-conditional generation.
         :param g_seed: random seed
         :param cfg: classifier-free guidance ratio
         :param top_k: top-k sampling
         :param top_p: top-p sampling
         :param more_smooth: smoothing the pred using gumbel softmax; only used in visualization, not used in FID/IS benchmarking
+        :param full_range: when num_steps is given, subsample the FULL schedule
+            (t: K-1 -> 0, pure generation) instead of the experimental [K-100, K-50) slice.
+        :param verbose: print the per-step size/t progression.
+        :param save_history: path of the step-by-step visualization grid; None disables
+            history collection entirely (required for FID runs: the history clones every
+            intermediate batch and would exhaust GPU memory over long schedules).
+        :param t_schedule: explicit, strictly decreasing list of timesteps to visit
+            (e.g. a DP-computed schedule). Overrides num_steps/shift/full_range entirely.
+            Must start at K-1 for input-free (inp_B3HW=None) generation.
         :return: if returns_vemb: list of embedding h_BChw := vae_embed(idx_Bl), else: list of idx_Bl
         """
         if g_seed is None: rng = None
@@ -173,44 +231,41 @@ class VAR(nn.Module):
         
         sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
         
-        schedule = torch.flip(torch.arange(len(self.sigmas)), dims=[0])
-        if shift is not None:
-            M = schedule.max()
-            schedule = schedule / M
-            schedule = shift * schedule / (1 + (shift - 1) * schedule)
-            schedule = (schedule * M).long()
-
-        if num_steps is not None:
-            # indces = torch.linspace(0, len(schedule)-1, num_steps).long()
-            indces = torch.linspace(len(schedule)-100, len(schedule)-50, num_steps).long()
-            # indces = torch.linspace(len(schedule)-200, len(schedule)-1, num_steps).long()
-            schedule = schedule[indces]
+        schedule = self.build_schedule(num_steps=num_steps, shift=shift, full_range=full_range, t_schedule=t_schedule)
+        if verbose: print(f"schedule ({len(schedule)} steps): {schedule.tolist()}")
 
         t = schedule[0]
         size = self._t_to_size(int(t))
-        print(f"start size = {size}")
+        if verbose: print(f"start size = {size}")
         # temb = self.time_emb(self.get_time_embedding(t.reshape(1).to(inp_B3HW)).unsqueeze(1))
         temb = self.pos_tC[t].reshape(1, 1, -1)
-        sigma = self.sigmas[t].reshape(1,1,1,1)
-        # inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
-        dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
-        dct_B3HW = (- sigma * self.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
-        # amplitude-preserving low-pass: undo the 256/size DCT-crop amplification so the VAE
-        # sees in-range [-1,1] images (consistent with training).
-        inp_B3HW = (iDCT(dct_B3HW) * (size / 256)).float()
-        # inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
-        history = [ inp_B3HW.clone() ]
-        next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
-        next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
-        next_token_map = next_token_map.repeat(2,1,1)
         pos_1LC = self.pos_embeds[str(size // 16)]
+        history = []
         if int(t) == len(self.sigmas) - 1:
             # maximal-blur seed: mirror VAR.forward's torch.where(t==len(sigmas)-1, sos, x_BLC).
             # At t=K-1 the model is trained on a class+time-only seed (word_embed and the
             # position embeddings are dropped), so feeding the blurred image tokens here would
-            # be off-distribution.
+            # be off-distribution. inp_B3HW is not used at all on this path (it may be None),
+            # so the VAE encode of the blurred input is skipped: pure generation.
             next_token_map = sos.unsqueeze(1).expand(-1, pos_1LC.shape[1], -1) + temb
         else:
+            assert inp_B3HW is not None, (
+                f"inp_B3HW is required when the schedule starts at t={int(t)} < {len(self.sigmas)-1} "
+                f"(only a maximal-blur start is input-free; pass full_range=True or num_steps=None)."
+            )
+            sigma = self.sigmas[t].reshape(1,1,1,1)
+            # inp_B3HW = torch.nn.functional.interpolate(inp_B3HW, size=(size, size), mode="bilinear", align_corners=False)
+            dct_B3HW = DCT(inp_B3HW)[:,:,:size,:size]
+            dct_B3HW = (- sigma * self.freqs[:,:,:size,:size]).exp().to(dct_B3HW) * dct_B3HW
+            # amplitude-preserving low-pass: undo the 256/size DCT-crop amplification so the VAE
+            # sees in-range [-1,1] images (consistent with training).
+            inp_B3HW = (iDCT(dct_B3HW) * (size / 256)).float()
+            # inp_B3HW = inp_B3HW.mean((2,3),True).repeat(1,1,256,256)
+            if save_history is not None:
+                history.append( inp_B3HW.clone() )
+            next_token_map = self.vae_proxy[0].img_to_idxBl(inp_B3HW).long()
+            next_token_map = self.vae_quant_proxy[0].idxBl_to_var_input(next_token_map)
+            next_token_map = next_token_map.repeat(2,1,1)
             next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
 
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
@@ -234,13 +289,14 @@ class VAR(nn.Module):
             
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, size//16, size//16)
             inp_B3HW_next = self.vae_proxy[0].fhat_to_img(h_BChw).float()
-            history.append( inp_B3HW_next.clone() )
+            if save_history is not None:
+                history.append( inp_B3HW_next.clone() )
             if i < len(schedule) - 1:
                 prev_size = size                       # resolution of the current block (s_prev)
                 t_next = schedule[i+1]
                 sigma_next = self.sigmas[t_next].reshape(1,1,1,1)
                 size = self._t_to_size(int(t_next))
-                print(size, t_next)
+                if verbose: print(size, t_next)
                 dct_B3HW = DCT(inp_B3HW_next)[:,:,:size,:size]
                 if dct_B3HW.shape[2] != size:
                     dct_B3HW = torch.nn.functional.pad(dct_B3HW, (0, size - dct_B3HW.shape[3], 0, size - dct_B3HW.shape[2]))
@@ -265,13 +321,15 @@ class VAR(nn.Module):
                 else:
                     next_token_map = self.word_embed(next_token_map) + sos.unsqueeze(1) + temb + pos_1LC
 
-            history.append( inp_B3HW_next.clone() )
+            if save_history is not None:
+                history.append( inp_B3HW_next.clone() )
 
-        import torchvision
-        history = [ torch.nn.functional.interpolate(h, size=(256, 256), mode="bilinear", align_corners=False) for h in history ]
-        torchvision.utils.save_image(
-            torch.cat(history), "generated2.png", normalize=True, nrow=B, value_range=(-1,1),
-        )
+        if save_history is not None:
+            import torchvision
+            history = [ torch.nn.functional.interpolate(h, size=(256, 256), mode="bilinear", align_corners=False) for h in history ]
+            torchvision.utils.save_image(
+                torch.cat(history), save_history, normalize=True, nrow=B, value_range=(-1,1),
+            )
 
         for b in self.blocks: b.attn.kv_caching(False)
         return inp_B3HW_next.add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
