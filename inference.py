@@ -24,7 +24,7 @@ from utils.data import build_dataset
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     # generation
-    p.add_argument('--ckpt', type=str, default='local_output_padtoken/ar-ckpt-last.pth')
+    p.add_argument('--ckpt', type=str, default='local_output_gaussblur/ar-ckpt-last.pth')
     p.add_argument('--gen-batch', type=int, default=9, help='batch size = number of images per grid row')
     p.add_argument('--cfg', type=float, default=2.0)
     p.add_argument('--top-k', type=int, default=600)

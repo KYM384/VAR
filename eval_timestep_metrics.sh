@@ -2,7 +2,7 @@
 
 #PJM -L rscgrp=regular-a
 #PJM -L node=1
-#PJM -L elapse=12:00:00
+#PJM -L elapse=3:00:00
 #PJM -L jobenv=singularity
 #PJM -g gb20
 #PJM -j

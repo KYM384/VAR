@@ -45,7 +45,7 @@ FEATURE_DIM = 2048
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     # generation
-    p.add_argument('--ckpt', type=str, default='local_output_padtoken/ar-ckpt-last.pth')
+    p.add_argument('--ckpt', type=str, default='local_output_gaussblur/ar-ckpt-last.pth')
     p.add_argument('--num-gen', type=int, default=50000, help='number of generated samples (label i%%1000 -> exactly 50/class at 50000)')
     p.add_argument('--gen-batch', type=int, default=25, help='generation batch size per GPU')
     p.add_argument('--cfg', type=float, default=2.0)

@@ -40,7 +40,7 @@ from utils.data import ImageNetValDataset, pil_loader, normalize_01_into_pm1
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--ckpt', type=str, default='local_output_padtoken/ar-ckpt-last.pth')
+    p.add_argument('--ckpt', type=str, default='local_output_gaussblur/ar-ckpt-last.pth')
     p.add_argument('--data-path', type=str, default='/data')
     p.add_argument('--out-dir', type=str, default='timestep_metrics')
     p.add_argument('--num-val', type=int, default=-1, help='number of val images (-1 = all 50000)')

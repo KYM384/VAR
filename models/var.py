@@ -67,6 +67,12 @@ class VAR(nn.Module):
             str(side): nn.Parameter(torch.empty(1, side * side, self.C))
             for side in self.grid_sides
         })
+        # torch.empty is uninitialized memory and init_weights() only visits nn.Linear/
+        # nn.Embedding/norm/conv modules -- bare Parameters are skipped there, so they MUST
+        # be initialized here or they keep whatever bytes the allocator hands over
+        # (dirty memory here = loss NaN from the very first iteration).
+        for p in self.pos_embeds.values():
+            nn.init.trunc_normal_(p.data, mean=0, std=init_std)
         
         # 4. backbone blocks
         self.shared_ada_lin = nn.Sequential(nn.SiLU(inplace=False), SharedAdaLin(self.D, 6*self.C)) if shared_aln else nn.Identity()
@@ -129,6 +135,8 @@ class VAR(nn.Module):
         ).reshape(1,1,image_size,image_size), persistent=False)
 
         self.pos_tC = nn.Parameter(torch.empty(K, self.C))
+        # bare Parameter: init_weights() skips it, initialize explicitly (see pos_embeds note)
+        nn.init.trunc_normal_(self.pos_tC.data, mean=0, std=init_std)
 
     def get_logits(self, h_or_h_and_residual: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], cond_BD: Optional[torch.Tensor]):
         if not isinstance(h_or_h_and_residual, torch.Tensor):
